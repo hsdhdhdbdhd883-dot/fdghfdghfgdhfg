@@ -38,8 +38,8 @@ const MEDAL_VARIANTS = [
     'https://cdn.changes.tg/gifts/models/Victory%20Medal/lottie/The%20Founder.json'
 ];
 
-// IDs предметов, которые МОЖНО улучшать сейчас
-const UPGRADABLE_IDS = [1, 4]; // 1=Moon, 4=Medal. Остальные (Test, Brick...) нельзя.
+// IDs предметов, которые МОЖНО улучшать сейчас (остальные - "в будущем")
+const UPGRADABLE_IDS = [1, 4]; 
 
 // --- БАЗА ДАННЫХ ---
 const db = new sqlite3.Database('database.db'); 
@@ -99,17 +99,13 @@ db.serialize(() => {
     db.get("SELECT count(*) as count FROM shop_items", (err, row) => {
         if (row.count === 0) {
             const stmt = db.prepare("INSERT INTO shop_items (id, name, icon, price, type, max_supply) VALUES (?, ?, ?, ?, ?, ?)");
-            // Старые
             stmt.run(1, 'Astral Shard', 'https://cdn.changes.tg/gifts/models/Astral%20Shard/lottie/Original.json', 5000, 'gift', 10000);
             stmt.run(2, 'Test Gift', 'https://cdn.changes.tg/gifts/models/Big%20Year/lottie/Telegram.json', 2500, 'gift', 10000);
             stmt.run(4, 'Victory Medal', 'https://cdn.changes.tg/gifts/models/Victory%20Medal/lottie/Original.json', 10000, 'gift', 10000);
             stmt.run(5, 'B-Day Candle', 'https://cdn.changes.tg/gifts/models/B-Day%20Candle/lottie/Original.json', 20000, 'auction', 100);
-            
-            // НОВЫЕ (ID 6, 7, 8)
             stmt.run(6, 'Artisan Brick', 'https://cdn.changes.tg/gifts/models/Artisan%20Brick/lottie/Original.json', 1500, 'gift', 10000);
             stmt.run(7, 'Clover Pin', 'https://cdn.changes.tg/gifts/models/Clover%20Pin/lottie/Original.json', 3000, 'gift', 10000);
             stmt.run(8, 'Bow Tie', 'https://cdn.changes.tg/gifts/models/Bow%20Tie/lottie/Original.json', 4500, 'gift', 10000);
-            
             stmt.finalize();
         }
     });
@@ -172,7 +168,6 @@ app.get('/api/shop', (req, res) => {
 });
 
 app.get('/api/feed', (req, res) => {
-    // ОПТИМИЗАЦИЯ: LIMIT 30
     db.all(`
         SELECT ua.*, u.username as owner_name, u.photo_url as owner_photo, si.name, COALESCE(ua.custom_icon, si.icon) as icon, si.price as base_price 
         FROM user_assets ua 
@@ -262,9 +257,8 @@ app.post('/api/upgrade', (req, res) => {
     db.get("SELECT * FROM users WHERE telegram_id = ?", [tg_id], (err, user) => {
         db.get("SELECT * FROM user_assets WHERE id = ?", [asset_id], (err, asset) => {
             
-            // --- ПРОВЕРКА НА ВОЗМОЖНОСТЬ УЛУЧШЕНИЯ ---
             if (!UPGRADABLE_IDS.includes(asset.item_id)) {
-                return res.json({ error: "Улучшение для этого предмета пока недоступно!" });
+                return res.json({ error: "Улучшение недоступно" });
             }
 
             if (asset.is_upgraded === 1) return res.json({ error: "Уже улучшено!" });
@@ -346,8 +340,31 @@ app.get('/', (req, res) => {
         .modal-subtitle { color: rgba(255,255,255,0.6); font-size: 13px; margin-top: 2px; z-index: 2; }
         .modal-body { background: var(--bg-color); flex: 1; padding: 15px; border-radius: 20px 20px 0 0; margin-top: -20px; z-index: 5; position: relative; overflow-y: auto; }
         
-        .action-btn { background: #4b4b4b; color: white; border-radius: 12px; padding: 12px; text-align: center; font-weight: bold; margin-bottom: 15px; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; border: 1px solid rgba(255,255,255,0.1); }
-        .action-btn.disabled { opacity: 0.6; cursor: not-allowed; }
+        /* UNIFIED BUTTON STYLE */
+        .action-btn { 
+            background-color: #007aff; /* Default Blue */
+            color: white; 
+            border-radius: 12px; 
+            padding: 16px; 
+            text-align: center; 
+            font-weight: bold; 
+            font-size: 16px;
+            margin-bottom: 15px; 
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            justify-content: center; 
+            cursor: pointer; 
+            border: none;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        /* GREY / DISABLED STATE */
+        .action-btn.disabled { 
+            background-color: #2b2f36; 
+            color: #707579; 
+            cursor: not-allowed; 
+        }
         
         .owner-row { background: var(--card-bg); border-radius: 12px; padding: 10px 15px; display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; }
         .owner-info h4 { margin: 0; font-size: 14px; }
@@ -425,12 +442,11 @@ app.get('/', (req, res) => {
     <div class="grid" id="grid"></div>
 
     <div class="bottom-nav">
-        <div class="nav-item" onclick="switchTab('gifts')" id="tab-gifts">🎁 подарки</div>
-        <div class="nav-item active" onclick="switchTab('store')" id="tab-store">🏪 магазин</div>
-        <div class="nav-item" onclick="switchTab('feed')" id="tab-feed">🌐 лента</div>
+        <div class="nav-item" onclick="switchTab('gifts')" id="tab-gifts">Подарки</div>
+        <div class="nav-item active" onclick="switchTab('store')" id="tab-store">Магазин</div>
+        <div class="nav-item" onclick="switchTab('feed')" id="tab-feed">Лента</div>
     </div>
 
-    <!-- MAIN MODAL (Unified) -->
     <div class="modal" id="modal">
         <div class="modal-header-bg" id="modalHeaderBg">
             <div class="pattern-overlay" id="patternOverlay"></div>
@@ -493,7 +509,6 @@ app.get('/', (req, res) => {
         </div>
     </div>
 
-    <!-- POPUPS -->
     <div class="popup-overlay" id="makeOfferPopup">
         <div class="popup-card">
             <div class="popup-close-x" onclick="closeMakeOffer()">✕</div>
@@ -569,13 +584,12 @@ app.get('/', (req, res) => {
         let selectedOffer = null;
         let currentBidValue = 20000;
 
-        // ПРЕДМЕТЫ, КОТОРЫЕ МОЖНО УЛУЧШАТЬ (CLIENT SIDE CHECK FOR BUTTON)
+        // ПРЕДМЕТЫ, КОТОРЫЕ МОЖНО УЛУЧШАТЬ
         const UPGRADABLE_IDS = [1, 4];
 
         const STAR_ICON_HTML = \`<dotlottie-wc src="https://lottie.host/f42e58f6-6962-4577-9b8a-356493ceb944/y8oP6MQR1T.lottie" style="width: 18px; height: 18px; display:inline-block; vertical-align: middle;" autoplay loop></dotlottie-wc>\`;
         const BG_COLORS = { 'Black': '#111111', 'Midnight': '#191970', 'Forest': '#013220', 'Lava': '#4a0404' };
 
-        // ОПТИМИЗАЦИЯ: ОДИН OBSERVER
         let observer = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
                 const player = entry.target;
@@ -590,9 +604,7 @@ app.get('/', (req, res) => {
         }
 
         function observeLotties() {
-            // Сначала отключаем старых, чтобы не текла память
             observer.disconnect();
-            // Подключаем новых
             document.querySelectorAll('lottie-player').forEach(player => observer.observe(player));
         }
 
@@ -677,7 +689,7 @@ app.get('/', (req, res) => {
                 card.innerHTML = \`\${ribbon}<div class="card-icon">\${renderIcon(item.icon)}</div>\`;
                 grid.appendChild(card);
             });
-            observeLotties(); // ВАЖНО: ЗАПУСК ОПТИМИЗАЦИИ
+            observeLotties();
         }
 
         async function openModal(item) {
@@ -690,15 +702,20 @@ app.get('/', (req, res) => {
             document.getElementById('mIcon').innerHTML = renderIcon(item.icon);
             document.getElementById('mTitle').innerText = item.name;
             
+            // Заголовок
             let subtitle = 'Покупка из магазина';
             if(item.serial_number) subtitle = \`предмет #\${item.serial_number}, выпущен @h3lix_official\`;
+            
+            // Если в магазине, и это не улучшаемый предмет - показываем "Подарок можно будет..."
+            if(currentTab === 'store' && !UPGRADABLE_IDS.includes(item.id) && item.type !== 'auction') {
+                subtitle = "Подарок можно будет улучшить в будущем";
+            }
             document.getElementById('mSubtitle').innerText = subtitle;
             
             let ownerName = "Магазин";
             if(item.owner_name) ownerName = item.owner_name;
             else if(item.original_owner) ownerName = item.original_owner;
             if(isMine) ownerName = "Вы";
-            
             document.getElementById('ownerName').innerText = ownerName;
 
             const headerBg = document.getElementById('modalHeaderBg');
@@ -717,10 +734,12 @@ app.get('/', (req, res) => {
 
             const btn = document.getElementById('actionBtn');
             const btnText = document.getElementById('actionText');
-            const btnIcon = document.getElementById('actionIcon');
             const offersContainer = document.getElementById('offersContainer');
             offersContainer.style.display = 'none';
-            btn.classList.remove('disabled');
+            
+            // СБРОС КЛАССОВ КНОПКИ
+            btn.className = 'action-btn'; // Вернуть базу
+            btn.onclick = null;
 
             if(currentTab === 'store') {
                 if(item.type === 'auction') {
@@ -728,51 +747,38 @@ app.get('/', (req, res) => {
                     btn.onclick = () => openAuctionModal(item);
                 } else if(item.minted_count >= item.max_supply) {
                     btnText.innerText = "Распродано";
-                    btn.style.background = '#333';
-                    btn.onclick = null;
+                    btn.classList.add('disabled');
                 } else {
                     btnText.innerText = \`Купить за \${item.price} звёзд\`;
-                    btnIcon.innerText = '🛒';
-                    btn.style.background = '#2ea6ff';
                     btn.onclick = handleAction;
                 }
             } else {
                 if(isMine) {
                     if(!item.is_upgraded) {
-                        // ПРОВЕРКА: МОЖНО ЛИ УЛУЧШАТЬ?
                         if (UPGRADABLE_IDS.includes(item.item_id || item.id)) {
                             btnText.innerText = "Улучшить";
-                            btn.style.background = 'linear-gradient(45deg, #ffc107, #ff9800)';
-                            btn.style.color = '#000';
                             btn.onclick = handleAction;
                         } else {
-                            // ЗАБЛОКИРОВАНО
-                            btnText.innerText = "Скоро...";
-                            btn.style.background = '#3f3f3f';
-                            btn.style.color = '#777';
+                            btnText.innerText = "Улучшение недоступно";
                             btn.classList.add('disabled');
-                            btn.onclick = null;
                         }
                     } else {
                         btnText.innerText = "Продать (Скоро)";
-                        btn.style.background = '#3f3f3f';
-                        btn.style.color = '#fff';
-                        btn.onclick = null;
+                        btn.classList.add('disabled');
                         loadOffers(item.id);
                     }
                 } else {
                     btnText.innerText = "Предложить сделку";
-                    btnIcon.innerText = '$';
-                    btn.style.background = '#3f3f3f';
-                    btn.style.color = '#fff';
                     btn.onclick = openMakeOffer;
                 }
             }
 
             const list = document.getElementById('attrList');
             list.innerHTML = '';
-            const modelIcon = item.icon.startsWith('http') ? '💠' : item.icon;
-            addAttrRow(list, modelIcon, 'Модель', \`\${item.name} <span class="val-blue">100%</span>\`);
+            
+            // 1. МОДЕЛЬ (С ИКОНКОЙ)
+            const modelIconHtml = item.icon.startsWith('http') ? \`<div style="width:24px;height:24px">\${renderIcon(item.icon)}</div>\` : '💠';
+            addAttrRow(list, modelIconHtml, 'Модель', \`\${item.name} <span class="val-blue">100%</span>\`);
 
             if (item.is_upgraded) {
                 addAttrRow(list, '🦄', 'Узор', \`\${item.pattern} <span class="val-blue">\${item.rarity_pattern}%</span>\`);
