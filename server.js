@@ -9,7 +9,7 @@ const io = new Server(server);
 
 app.use(express.json());
 
-// --- СПИСКИ ВАРИАНТОВ ---
+// --- ВАРИАНТЫ СКИНОВ ---
 const MOON_VARIANTS = [
     'https://cdn.changes.tg/gifts/models/Astral%20Shard/lottie/Aquamarine.json',
     'https://cdn.changes.tg/gifts/models/Astral%20Shard/lottie/Aquarium.json',
@@ -39,16 +39,16 @@ const MEDAL_VARIANTS = [
 ];
 
 // --- БАЗА ДАННЫХ ---
-const db = new sqlite3.Database(':memory:'); 
+const db = new sqlite3.Database('database.db'); // Файл, чтобы данные сохранялись
 
 db.serialize(() => {
-    db.run(`CREATE TABLE users (
+    db.run(`CREATE TABLE IF NOT EXISTS users (
         telegram_id INTEGER PRIMARY KEY,
         username TEXT,
         balance INTEGER DEFAULT 100000
     )`);
 
-    db.run(`CREATE TABLE shop_items (
+    db.run(`CREATE TABLE IF NOT EXISTS shop_items (
         id INTEGER PRIMARY KEY,
         name TEXT,
         icon TEXT,
@@ -56,7 +56,7 @@ db.serialize(() => {
         type TEXT
     )`);
 
-    db.run(`CREATE TABLE user_assets (
+    db.run(`CREATE TABLE IF NOT EXISTS user_assets (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id INTEGER,
         item_id INTEGER,
@@ -70,20 +70,18 @@ db.serialize(() => {
         custom_icon TEXT DEFAULT NULL
     )`);
 
-    const stmt = db.prepare("INSERT INTO shop_items (id, name, icon, price, type) VALUES (?, ?, ?, ?, ?)");
-    
-    // ID 1: Moon
-    stmt.run(1, 'Moon', 'https://cdn.changes.tg/gifts/models/Astral%20Shard/lottie/Original.json', 5000, 'gift');
-    // ID 2: Voodoo Doll
-    stmt.run(2, 'Voodoo Doll', '🧸', 2500, 'gift');
-    // ID 3: Skull
-    stmt.run(3, 'Skull', '💀', 1000, 'gift');
-    // ID 4: Victory Medal
-    stmt.run(4, 'Victory Medal', 'https://cdn.changes.tg/gifts/models/Victory%20Medal/lottie/Original.json', 10000, 'gift');
-    // ID 5: B-Day Candle (АУКЦИОН)
-    stmt.run(5, 'B-Day Candle', 'https://cdn.changes.tg/gifts/models/B-Day%20Candle/lottie/Original.json', 20000, 'auction');
-    
-    stmt.finalize();
+    // Заполняем магазин (если пусто)
+    db.get("SELECT count(*) as count FROM shop_items", (err, row) => {
+        if (row.count === 0) {
+            const stmt = db.prepare("INSERT INTO shop_items (id, name, icon, price, type) VALUES (?, ?, ?, ?, ?)");
+            stmt.run(1, 'Moon', 'https://cdn.changes.tg/gifts/models/Astral%20Shard/lottie/Original.json', 5000, 'gift');
+            stmt.run(2, 'Voodoo Doll', '🧸', 2500, 'gift');
+            stmt.run(3, 'Skull', '💀', 1000, 'gift');
+            stmt.run(4, 'Victory Medal', 'https://cdn.changes.tg/gifts/models/Victory%20Medal/lottie/Original.json', 10000, 'gift');
+            stmt.run(5, 'B-Day Candle', 'https://cdn.changes.tg/gifts/models/B-Day%20Candle/lottie/Original.json', 20000, 'auction');
+            stmt.finalize();
+        }
+    });
 });
 
 // --- КОНФИГ ---
@@ -106,22 +104,32 @@ function getRandomAttr(array) { return array[Math.floor(Math.random() * array.le
 
 app.post('/api/login', (req, res) => {
     const { tg_id, username } = req.body;
+    
+    // Проверяем, есть ли юзер. Если есть - обновляем никнейм (вдруг сменил). Если нет - создаем.
     db.get("SELECT * FROM users WHERE telegram_id = ?", [tg_id], (err, user) => {
         if (!user) {
-            db.run("INSERT INTO users (telegram_id, username) VALUES (?, ?)", [tg_id, username]);
-            res.json({ balance: 100000, assets: [] });
+            db.run("INSERT INTO users (telegram_id, username) VALUES (?, ?)", [tg_id, username], () => {
+                sendUserData(res, tg_id, username, 100000);
+            });
         } else {
-            db.all(`
-                SELECT ua.*, si.name, COALESCE(ua.custom_icon, si.icon) as icon, si.price as base_price, si.type as item_type 
-                FROM user_assets ua 
-                JOIN shop_items si ON ua.item_id = si.id 
-                WHERE ua.user_id = ?`, 
-            [tg_id], (err, assets) => {
-                res.json({ balance: user.balance, assets: assets, username: user.username });
+            // Обновляем никнейм, чтобы был актуальный
+            db.run("UPDATE users SET username = ? WHERE telegram_id = ?", [username, tg_id], () => {
+                sendUserData(res, tg_id, username, user.balance);
             });
         }
     });
 });
+
+function sendUserData(res, tg_id, username, balance) {
+    db.all(`
+        SELECT ua.*, si.name, COALESCE(ua.custom_icon, si.icon) as icon, si.price as base_price, si.type as item_type 
+        FROM user_assets ua 
+        JOIN shop_items si ON ua.item_id = si.id 
+        WHERE ua.user_id = ?`, 
+    [tg_id], (err, assets) => {
+        res.json({ balance: balance, assets: assets, username: username });
+    });
+}
 
 app.get('/api/shop', (req, res) => {
     db.all("SELECT * FROM shop_items", (err, rows) => {
@@ -129,7 +137,7 @@ app.get('/api/shop', (req, res) => {
     });
 });
 
-// ОБЫЧНАЯ ПОКУПКА
+// ПОКУПКА
 app.post('/api/buy', (req, res) => {
     const { tg_id, item_id, username } = req.body;
     
@@ -157,20 +165,20 @@ app.post('/api/buy', (req, res) => {
     });
 });
 
-// АУКЦИОННАЯ СТАВКА (Имитация победы)
+// АУКЦИОН (СТАВКА)
 app.post('/api/bid', (req, res) => {
     const { tg_id, item_id, amount, username } = req.body;
     
     db.get("SELECT * FROM users WHERE telegram_id = ?", [tg_id], (err, user) => {
+        // Проверка баланса
+        if (user.balance < amount) return res.json({ error: "Недостаточно звезд для ставки!" });
+        
         db.get("SELECT * FROM shop_items WHERE id = ?", [item_id], (err, item) => {
-            // Проверка баланса
-            if (user.balance < amount) return res.json({ error: "Недостаточно звезд для ставки!" });
-            
             // Списываем ставку
             const newBalance = user.balance - amount;
             db.run("UPDATE users SET balance = ? WHERE telegram_id = ?", [newBalance, tg_id]);
 
-            // Выдаем предмет (Имитация победы в аукционе)
+            // Выдаем предмет
             db.get("SELECT COUNT(*) as count FROM user_assets WHERE item_id = ?", [item_id], (err, row) => {
                 const serial = row.count + 1;
                 db.run(`INSERT INTO user_assets (user_id, item_id, serial_number, original_owner) VALUES (?, ?, ?, ?)`, 
@@ -203,7 +211,6 @@ app.post('/api/upgrade', (req, res) => {
             let newIcon = null;
             if (asset.item_id === 1) newIcon = getRandomAttr(MOON_VARIANTS);
             else if (asset.item_id === 4) newIcon = getRandomAttr(MEDAL_VARIANTS);
-            // Для свечи (ID 5) оставляем иконку стоковой (null), так как нет вариантов, но меняем атрибуты
 
             const newBalance = user.balance - UPGRADE_PRICE;
             db.run("UPDATE users SET balance = ? WHERE telegram_id = ?", [newBalance, tg_id]);
@@ -230,7 +237,6 @@ app.get('/', (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <!-- ОПТИМИЗИРОВАННЫЙ СКРИПТ LOTTIE -->
     <script src="https://unpkg.com/@lottiefiles/lottie-player@latest/dist/lottie-player.js"></script>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <title>NFTGifter</title>
@@ -261,14 +267,39 @@ app.get('/', (req, res) => {
         .modal.open { display: flex; animation: fadeIn 0.2s; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
-        /* STANDARD MODAL HEADER */
-        .modal-header-bg { position: relative; height: 40%; display: flex; flex-direction: column; align-items: center; justify-content: center; background-color: #1a1a1a; transition: background 0.5s; overflow: hidden; }
+        /* === ФИКС РАЗМЕРОВ МОДАЛКИ (Чтобы влезало без растягивания) === */
+        .modal-header-bg { 
+            position: relative; 
+            flex-shrink: 0; /* Не сжимать */
+            height: auto; 
+            min-height: 280px; /* Фикс высота, поменьше чем было */
+            display: flex; 
+            flex-direction: column; 
+            align-items: center; 
+            justify-content: center; 
+            background-color: #1a1a1a; 
+            transition: background 0.5s; 
+            overflow: hidden; 
+            padding-bottom: 20px;
+        }
         .pattern-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0.1; background-size: 40px 40px; pointer-events: none; }
         .close-btn-float { position: absolute; top: 15px; right: 15px; background: rgba(0,0,0,0.3); color: #fff; border-radius: 20px; padding: 5px 12px; font-size: 14px; cursor: pointer; z-index: 10; }
-        .modal-main-icon { width: 180px; height: 180px; display: flex; align-items: center; justify-content: center; font-size: 100px; margin-bottom: 10px; z-index: 2; filter: drop-shadow(0 0 20px rgba(0,0,0,0.5)); }
-        .modal-title { font-size: 24px; font-weight: bold; margin: 0; z-index: 2; }
-        .modal-subtitle { color: rgba(255,255,255,0.6); font-size: 14px; margin-top: 5px; z-index: 2; }
-        .modal-body { background: var(--bg-color); flex: 1; padding: 15px; border-radius: 20px 20px 0 0; margin-top: -20px; z-index: 5; position: relative; }
+        
+        /* Уменьшил иконку, чтобы влезала на мелких экранах */
+        .modal-main-icon { 
+            width: 140px; 
+            height: 140px; 
+            display: flex; align-items: center; justify-content: center; 
+            font-size: 80px; 
+            margin-bottom: 5px; 
+            margin-top: 10px;
+            z-index: 2; 
+            filter: drop-shadow(0 0 20px rgba(0,0,0,0.5)); 
+        }
+        
+        .modal-title { font-size: 22px; font-weight: bold; margin: 0; z-index: 2; }
+        .modal-subtitle { color: rgba(255,255,255,0.6); font-size: 13px; margin-top: 2px; z-index: 2; }
+        .modal-body { background: var(--bg-color); flex: 1; padding: 15px; border-radius: 20px 20px 0 0; margin-top: -20px; z-index: 5; position: relative; overflow-y: auto; }
         
         .action-btn { background: #4b4b4b; color: white; border-radius: 12px; padding: 12px; text-align: center; font-weight: bold; margin-bottom: 15px; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; border: 1px solid rgba(255,255,255,0.1); }
         .owner-row { background: var(--card-bg); border-radius: 12px; padding: 10px 15px; display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; }
@@ -284,70 +315,94 @@ app.get('/', (req, res) => {
         .attr-value { font-size: 13px; color: var(--secondary-text); }
         .val-blue { color: var(--accent); }
 
-        /* --- AUCTION MODAL SPECIFIC (1-in-1 Design) --- */
+        /* --- AUCTION MODAL SPECIFIC (DARK THEME 1-in-1) --- */
         .auction-modal-content {
-            background-color: #0f151b;
+            background-color: #18191d; /* Темный фон как на скрине */
             width: 100%;
             height: 100%;
             display: flex;
             flex-direction: column;
             align-items: center;
             position: relative;
+            padding-top: 20px;
         }
         .auction-header {
             width: 100%;
-            padding: 20px 0;
             text-align: center;
             position: relative;
+            margin-bottom: 20px;
         }
-        .auction-title { font-size: 18px; font-weight: bold; color: #fff; }
-        .auction-subtitle { font-size: 14px; color: #707579; margin-top: 5px; }
+        .auction-title { font-size: 20px; font-weight: bold; color: #fff; margin-bottom: 4px; }
+        .auction-subtitle { font-size: 14px; color: #707579; }
+        
         .auction-close {
-            position: absolute; right: 15px; top: 15px;
-            width: 24px; height: 24px;
+            position: absolute; right: 20px; top: 0px;
+            width: 28px; height: 28px;
             background: rgba(255,255,255,0.1);
             border-radius: 50%;
             display: flex; align-items: center; justify-content: center;
             cursor: pointer;
-            color: #aaa;
-            font-size: 14px;
+            color: #ccc;
+            font-size: 16px;
         }
+        
+        /* Синий тег цены */
         .auction-bid-tag {
-            background: #1c4a7e;
-            color: #64b5f6;
-            padding: 5px 15px;
-            border-radius: 15px;
+            background: #235c97;
+            color: #ffffff;
+            padding: 8px 20px;
+            border-radius: 20px;
             font-weight: bold;
             font-size: 18px;
-            margin: 20px 0;
+            margin-bottom: 20px;
         }
+        
         .auction-main-icon {
-            width: 200px;
-            height: 200px;
-            margin: 20px 0;
+            width: 180px;
+            height: 180px;
+            margin-bottom: 20px;
             filter: drop-shadow(0 0 40px rgba(0,0,0,0.5));
         }
+        
+        /* Прогресс бар (имитация как на скрине полоска) */
+        .progress-container {
+            width: 90%;
+            height: 6px;
+            background: #2c2e33;
+            border-radius: 3px;
+            margin-bottom: 20px;
+            position: relative;
+        }
+        .progress-bar {
+            width: 30%;
+            height: 100%;
+            background: #707579;
+            border-radius: 3px;
+        }
+        
         .auction-footer {
             margin-top: auto;
             width: 100%;
             padding: 20px;
             box-sizing: border-box;
-            background: #0f151b;
+            background: #18191d;
         }
+        
         .btn-auction {
-            background: #1976d2; /* Синий как на скрине */
+            background: #1274c4; /* Насыщенный синий */
             color: white;
             width: 100%;
-            padding: 18px;
-            border-radius: 16px;
-            font-size: 18px;
-            font-weight: bold;
+            padding: 16px;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
             border: none;
             cursor: pointer;
         }
+        
         .auction-info-text {
             color: #555;
-            font-size: 12px;
+            font-size: 13px;
             text-align: center;
             margin-bottom: 15px;
         }
@@ -355,7 +410,7 @@ app.get('/', (req, res) => {
         /* --- VICTORY POPUP --- */
         .popup-overlay {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.7);
+            background: rgba(0,0,0,0.8);
             z-index: 3000;
             display: none;
             align-items: center;
@@ -369,6 +424,7 @@ app.get('/', (req, res) => {
             text-align: center;
             position: relative;
             animation: popIn 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
         }
         @keyframes popIn { from { transform: scale(0.8); opacity: 0; } to { transform: scale(1); opacity: 1; } }
         .popup-confetti { font-size: 50px; margin-bottom: 15px; display: block; }
@@ -426,7 +482,7 @@ app.get('/', (req, res) => {
         </div>
     </div>
 
-    <!-- AUCTION MODAL (NEW) -->
+    <!-- AUCTION MODAL (FIXED DESIGN) -->
     <div class="modal" id="auctionModal">
         <div class="auction-modal-content">
             <div class="auction-header">
@@ -436,6 +492,11 @@ app.get('/', (req, res) => {
             </div>
             
             <div class="auction-bid-tag">3690</div>
+            
+            <div class="progress-container">
+                <div class="progress-bar"></div>
+            </div>
+
             <div class="auction-main-icon" id="auctionIcon"></div>
             
             <div class="auction-footer">
@@ -464,8 +525,12 @@ app.get('/', (req, res) => {
         const tg = window.Telegram.WebApp;
         tg.expand();
         
-        const USER_ID = 12345;
-        const USERNAME = "Ilya";
+        // --- ПОЛУЧЕНИЕ РЕАЛЬНОГО ЮЗЕРА ---
+        // Если открыто в Телеграм - берем реальные данные.
+        // Если в браузере - берем тестовые.
+        const tgUser = tg.initDataUnsafe?.user;
+        const USER_ID = tgUser ? tgUser.id : 123456;
+        const USERNAME = tgUser ? (tgUser.username || tgUser.first_name) : "IlyaTest";
 
         let userBalance = 0;
         let storeItems = [];
@@ -473,13 +538,11 @@ app.get('/', (req, res) => {
         let currentTab = 'store'; 
         let selectedItem = null;
 
-        const ICONS = { model: '🌕', pattern: '🦄', bg: '⬛', price: '⭐' };
+        const ICONS = { model: '💠', pattern: '🦄', bg: '⬛', price: '⭐' };
 
         // ОПТИМИЗИРОВАННЫЙ РЕНДЕР
-        // Мы добавляем IntersectionObserver, чтобы анимации играли только когда они на экране
         function renderIcon(iconData, isLarge = false) {
             if (iconData.startsWith('http')) {
-                // background="transparent" важно для производительности
                 return \`<lottie-player 
                     src="\${iconData}" 
                     background="transparent" 
@@ -494,15 +557,10 @@ app.get('/', (req, res) => {
             }
         }
 
-        // --- ИНИЦИАЛИЗАЦИЯ НАБЛЮДАТЕЛЯ (ОПТИМИЗАЦИЯ) ---
         const observer = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
                 const player = entry.target;
-                if (entry.isIntersecting) {
-                    player.play();
-                } else {
-                    player.pause();
-                }
+                if (entry.isIntersecting) player.play(); else player.pause();
             });
         }, { threshold: 0.1 });
 
@@ -511,6 +569,7 @@ app.get('/', (req, res) => {
         }
 
         async function init() {
+            // ЛОГИН С РЕАЛЬНЫМИ ДАННЫМИ
             const res = await fetch('/api/login', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -548,7 +607,6 @@ app.get('/', (req, res) => {
             data.forEach(item => {
                 const card = document.createElement('div');
                 card.className = 'card';
-                // Если аукцион - своя функция открытия
                 if (currentTab === 'store' && item.type === 'auction') {
                     card.onclick = () => openAuctionModal(item);
                 } else {
@@ -562,8 +620,6 @@ app.get('/', (req, res) => {
                 card.innerHTML = \`\${ribbon}<div class="card-icon">\${renderIcon(item.icon)}</div>\`;
                 grid.appendChild(card);
             });
-            
-            // Включаем оптимизацию после рендера
             observeLotties();
         }
 
@@ -633,7 +689,7 @@ app.get('/', (req, res) => {
             document.getElementById('modal').classList.add('open');
         }
 
-        // --- AUCTION MODAL LOGIC (NEW) ---
+        // --- AUCTION MODAL LOGIC ---
         function openAuctionModal(item) {
             selectedItem = item;
             document.getElementById('auctionIcon').innerHTML = renderIcon(item.icon);
@@ -645,13 +701,11 @@ app.get('/', (req, res) => {
         }
 
         async function placeBid() {
-            // Имитация задержки "Сделать ставку"
             const btn = document.querySelector('.btn-auction');
             const originalText = btn.innerText;
             btn.innerText = "Обработка...";
             btn.disabled = true;
 
-            // Вызов API (это и ставка, и сразу победа для демо)
             const res = await fetch('/api/bid', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -678,8 +732,6 @@ app.get('/', (req, res) => {
             document.getElementById('winItemName').innerText = itemName;
             document.getElementById('winItemName2').innerText = itemName;
             document.getElementById('victoryPopup').style.display = 'flex';
-            
-            // Запускаем конфетти (emoji effect для простоты)
             for(let i=0; i<5; i++) {
                 setTimeout(() => tg.HapticFeedback.impactOccurred('light'), i * 100);
             }
@@ -689,18 +741,10 @@ app.get('/', (req, res) => {
             document.getElementById('victoryPopup').style.display = 'none';
         }
 
-        // --- COMMON LOGIC ---
-
         function addAttrRow(container, icon, label, valueHtml) {
             const div = document.createElement('div');
             div.className = 'attr-row';
-            div.innerHTML = \`
-                <div class="attr-icon-box">\${icon}</div>
-                <div class="attr-details">
-                    <span class="attr-name">\${label}</span>
-                    <span class="attr-value">\${valueHtml}</span>
-                </div>
-            \`;
+            div.innerHTML = \`<div class="attr-icon-box">\${icon}</div><div class="attr-details"><span class="attr-name">\${label}</span><span class="attr-value">\${valueHtml}</span></div>\`;
             container.appendChild(div);
         }
 
@@ -755,6 +799,5 @@ app.get('/', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+    console.log(`Server: http://localhost:${PORT}`);
 });
-
