@@ -84,9 +84,8 @@ db.serialize(() => {
     db.get("SELECT count(*) as count FROM shop_items", (err, row) => {
         if (row.count === 0) {
             const stmt = db.prepare("INSERT INTO shop_items (id, name, icon, price, type) VALUES (?, ?, ?, ?, ?)");
-            stmt.run(1, 'Moon', 'https://cdn.changes.tg/gifts/models/Astral%20Shard/lottie/Original.json', 5000, 'gift');
-            stmt.run(2, 'Voodoo Doll', '🧸', 2500, 'gift');
-            stmt.run(3, 'Skull', '💀', 1000, 'gift');
+            stmt.run(1, 'Astral Shard', 'https://cdn.changes.tg/gifts/models/Astral%20Shard/lottie/Original.json', 5000, 'gift');
+            stmt.run(2, 'Test', 'https://cdn.changes.tg/gifts/models/Big%20Year/lottie/Telegram.json', 2500, 'gift');
             stmt.run(4, 'Victory Medal', 'https://cdn.changes.tg/gifts/models/Victory%20Medal/lottie/Original.json', 10000, 'gift');
             stmt.run(5, 'B-Day Candle', 'https://cdn.changes.tg/gifts/models/B-Day%20Candle/lottie/Original.json', 20000, 'auction');
             stmt.finalize();
@@ -215,7 +214,7 @@ app.get('/', (req, res) => {
     
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <script src="/socket.io/socket.io.js"></script>
-    <title>NFTGifter</title>
+    <title>OpenGifter</title>
     <style>
         :root { --bg-color: #17212b; --card-bg: #232e3c; --text-color: #ffffff; --secondary-text: #707579; --accent: #2ea6ff; --gold: #ffc107; --red: #ff5252; --btn-bg: #2b3541; --modal-overlay: #000; }
         body { background-color: var(--bg-color); color: var(--text-color); font-family: -apple-system, BlinkMacSystemFont, Roboto, sans-serif; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
@@ -309,10 +308,10 @@ app.get('/', (req, res) => {
 
     <div class="header">
         <div id="headerAvatarContainer">
-             <div class="avatar-placeholder">🐸</div>
+             <div class="avatar-placeholder">✊</div>
         </div>
         <h1>Магазин</h1>
-        <p style="color:#707579; font-size:14px">Купи, улучши и владей</p>
+        <p style="color:#707579; font-size:14px">Test</p>
     </div>
 
     <div class="grid" id="grid"></div>
@@ -583,7 +582,7 @@ app.get('/', (req, res) => {
             const isMine = currentTab === 'gifts';
             document.getElementById('mIcon').innerHTML = renderIcon(item.icon);
             document.getElementById('mTitle').innerText = item.name;
-            document.getElementById('mSubtitle').innerText = isMine ? \`предмет #\${item.serial_number}, выпущен @NFTGifter\` : 'Покупка из магазина';
+            document.getElementById('mSubtitle').innerText = isMine ? \`предмет #\${item.serial_number}, выпущен @h3lix_official\` : 'Покупка из магазина';
             document.getElementById('ownerName').innerText = isMine ? item.original_owner : 'Магазин';
 
             const headerBg = document.getElementById('modalHeaderBg');
