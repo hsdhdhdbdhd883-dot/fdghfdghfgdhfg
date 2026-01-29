@@ -42,7 +42,6 @@ const MEDAL_VARIANTS = [
 const db = new sqlite3.Database('database.db'); 
 
 db.serialize(() => {
-    // Юзеры (добавил photo_url)
     db.run(`CREATE TABLE IF NOT EXISTS users (
         telegram_id INTEGER PRIMARY KEY,
         username TEXT,
@@ -72,7 +71,6 @@ db.serialize(() => {
         custom_icon TEXT DEFAULT NULL
     )`);
 
-    // История ставок для аукциона
     db.run(`CREATE TABLE IF NOT EXISTS auction_bids (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         item_id INTEGER,
@@ -83,7 +81,6 @@ db.serialize(() => {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
-    // Заполняем магазин (если пусто)
     db.get("SELECT count(*) as count FROM shop_items", (err, row) => {
         if (row.count === 0) {
             const stmt = db.prepare("INSERT INTO shop_items (id, name, icon, price, type) VALUES (?, ?, ?, ?, ?)");
@@ -113,12 +110,10 @@ const BACKGROUNDS = [
 
 function getRandomAttr(array) { return array[Math.floor(Math.random() * array.length)]; }
 
-// --- SOCKET.IO ДЛЯ АУКЦИОНА ---
+// --- SOCKET.IO ---
 io.on('connection', (socket) => {
-    // Когда юзер открывает аукцион, он подписывается на обновления
     socket.on('join_auction', (itemId) => {
         socket.join('auction_' + itemId);
-        // Отправляем текущую историю ставок этому юзеру
         db.all("SELECT * FROM auction_bids WHERE item_id = ? ORDER BY id DESC LIMIT 20", [itemId], (err, rows) => {
             if(!err) socket.emit('auction_history', rows);
         });
@@ -126,17 +121,14 @@ io.on('connection', (socket) => {
 });
 
 // --- API ---
-
 app.post('/api/login', (req, res) => {
     const { tg_id, username, photo_url } = req.body;
-    
     db.get("SELECT * FROM users WHERE telegram_id = ?", [tg_id], (err, user) => {
         if (!user) {
             db.run("INSERT INTO users (telegram_id, username, photo_url) VALUES (?, ?, ?)", [tg_id, username, photo_url], () => {
                 sendUserData(res, tg_id, username, 100000);
             });
         } else {
-            // Обновляем данные (если сменил аватарку или ник)
             db.run("UPDATE users SET username = ?, photo_url = ? WHERE telegram_id = ?", [username, photo_url, tg_id], () => {
                 sendUserData(res, tg_id, username, user.balance);
             });
@@ -145,80 +137,43 @@ app.post('/api/login', (req, res) => {
 });
 
 function sendUserData(res, tg_id, username, balance) {
-    db.all(`
-        SELECT ua.*, si.name, COALESCE(ua.custom_icon, si.icon) as icon, si.price as base_price, si.type as item_type 
-        FROM user_assets ua 
-        JOIN shop_items si ON ua.item_id = si.id 
-        WHERE ua.user_id = ?`, 
-    [tg_id], (err, assets) => {
+    db.all(`SELECT ua.*, si.name, COALESCE(ua.custom_icon, si.icon) as icon, si.price as base_price, si.type as item_type FROM user_assets ua JOIN shop_items si ON ua.item_id = si.id WHERE ua.user_id = ?`, [tg_id], (err, assets) => {
         res.json({ balance: balance, assets: assets, username: username });
     });
 }
 
-app.get('/api/shop', (req, res) => {
-    db.all("SELECT * FROM shop_items", (err, rows) => {
-        res.json(rows);
-    });
-});
+app.get('/api/shop', (req, res) => { db.all("SELECT * FROM shop_items", (err, rows) => { res.json(rows); }); });
 
-// ПОКУПКА (Обычная)
 app.post('/api/buy', (req, res) => {
     const { tg_id, item_id, username } = req.body;
-    
     db.get("SELECT * FROM users WHERE telegram_id = ?", [tg_id], (err, user) => {
         db.get("SELECT * FROM shop_items WHERE id = ?", [item_id], (err, item) => {
             if (user.balance < item.price) return res.json({ error: "Мало звезд" });
-            if (item.type === 'auction') return res.json({ error: "Этот предмет только через аукцион!" });
-
+            if (item.type === 'auction') return res.json({ error: "Только аукцион!" });
             const newBalance = user.balance - item.price;
             db.run("UPDATE users SET balance = ? WHERE telegram_id = ?", [newBalance, tg_id]);
-
             db.get("SELECT COUNT(*) as count FROM user_assets WHERE item_id = ?", [item_id], (err, row) => {
                 const serial = row.count + 1;
-                db.run(`INSERT INTO user_assets (user_id, item_id, serial_number, original_owner) VALUES (?, ?, ?, ?)`, 
-                    [tg_id, item_id, serial, username], 
-                    function(err) {
-                        res.json({ success: true, newBalance, asset: {
-                            id: this.lastID, item_id, serial_number: serial, name: item.name, icon: item.icon, 
-                            is_upgraded: 0, original_owner: username, base_price: item.price, item_type: item.type
-                        }});
-                    }
-                );
+                db.run(`INSERT INTO user_assets (user_id, item_id, serial_number, original_owner) VALUES (?, ?, ?, ?)`, [tg_id, item_id, serial, username], function(err) {
+                    res.json({ success: true, newBalance, asset: { id: this.lastID, item_id, serial_number: serial, name: item.name, icon: item.icon, is_upgraded: 0, original_owner: username, base_price: item.price, item_type: item.type }});
+                });
             });
         });
     });
 });
 
-// СТАВКА НА АУКЦИОНЕ (REAL-TIME)
 app.post('/api/bid', (req, res) => {
     const { tg_id, item_id, amount, username, photo_url } = req.body;
-    
     db.get("SELECT * FROM users WHERE telegram_id = ?", [tg_id], (err, user) => {
         if (user.balance < amount) return res.json({ error: "Недостаточно звезд!" });
-        
         db.get("SELECT * FROM shop_items WHERE id = ?", [item_id], (err, item) => {
-            // 1. Списываем баланс (в демо-режиме не возвращаем, если перебили, для упрощения)
             const newBalance = user.balance - amount;
             db.run("UPDATE users SET balance = ? WHERE telegram_id = ?", [newBalance, tg_id]);
-
-            // 2. Записываем ставку в историю
-            db.run(`INSERT INTO auction_bids (item_id, user_id, username, photo_url, amount) VALUES (?, ?, ?, ?, ?)`,
-                [item_id, tg_id, username, photo_url, amount],
-                function (err) {
-                    // 3. Отправляем событие всем через Socket.IO
-                    const bidData = {
-                        id: this.lastID,
-                        username: username,
-                        photo_url: photo_url,
-                        amount: amount,
-                        is_me: false // Фронт сам поймет, если это он
-                    };
-                    
-                    io.to('auction_' + item_id).emit('new_bid', bidData);
-                    
-                    res.json({ success: true, newBalance: newBalance });
-                }
-            );
+            db.run(`INSERT INTO auction_bids (item_id, user_id, username, photo_url, amount) VALUES (?, ?, ?, ?, ?)`, [item_id, tg_id, username, photo_url, amount], function (err) {
+                const bidData = { id: this.lastID, username: username, photo_url: photo_url, amount: amount };
+                io.to('auction_' + item_id).emit('new_bid', bidData);
+                res.json({ success: true, newBalance: newBalance });
+            });
         });
     });
 });
@@ -226,31 +181,20 @@ app.post('/api/bid', (req, res) => {
 app.post('/api/upgrade', (req, res) => {
     const { tg_id, asset_id } = req.body;
     const UPGRADE_PRICE = 2000; 
-
     db.get("SELECT * FROM users WHERE telegram_id = ?", [tg_id], (err, user) => {
         db.get("SELECT * FROM user_assets WHERE id = ?", [asset_id], (err, asset) => {
-            
-            if (asset.is_upgraded === 1) return res.json({ error: "Предмет уже улучшен!" });
+            if (asset.is_upgraded === 1) return res.json({ error: "Уже улучшено!" });
             if (user.balance < UPGRADE_PRICE) return res.json({ error: "Мало звезд" });
-
             const pat = getRandomAttr(PATTERNS);
             const bg = getRandomAttr(BACKGROUNDS);
-            
             let newIcon = null;
             if (asset.item_id === 1) newIcon = getRandomAttr(MOON_VARIANTS);
             else if (asset.item_id === 4) newIcon = getRandomAttr(MEDAL_VARIANTS);
-
             const newBalance = user.balance - UPGRADE_PRICE;
             db.run("UPDATE users SET balance = ? WHERE telegram_id = ?", [newBalance, tg_id]);
-
             db.run(`UPDATE user_assets SET pattern = ?, rarity_pattern = ?, background = ?, rarity_bg = ?, is_upgraded = 1, custom_icon = ? WHERE id = ?`, 
-                [pat.name, pat.rarity, bg.name, bg.rarity, newIcon, asset_id], 
-                () => {
-                    res.json({ success: true, newBalance, updates: { 
-                        pattern: pat.name, rarity_pattern: pat.rarity,
-                        background: bg.name, rarity_bg: bg.rarity,
-                        new_icon: newIcon
-                    }});
+                [pat.name, pat.rarity, bg.name, bg.rarity, newIcon, asset_id], () => {
+                    res.json({ success: true, newBalance, updates: { pattern: pat.name, rarity_pattern: pat.rarity, background: bg.name, rarity_bg: bg.rarity, new_icon: newIcon }});
                 }
             );
         });
@@ -265,9 +209,11 @@ app.get('/', (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <!-- LOTTIE & DOTLOTTIE -->
     <script src="https://unpkg.com/@lottiefiles/lottie-player@latest/dist/lottie-player.js"></script>
+    <script src="https://unpkg.com/@lottiefiles/dotlottie-wc@0.8.11/dist/dotlottie-wc.js" type="module"></script>
+    
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <!-- Подключаем Socket.IO клиент -->
     <script src="/socket.io/socket.io.js"></script>
     <title>NFTGifter</title>
     <style>
@@ -279,7 +225,7 @@ app.get('/', (req, res) => {
         .user-avatar-header { width: 80px; height: 80px; border-radius: 50%; margin-bottom: 10px; object-fit: cover; }
         @keyframes float { 0% { transform: translateY(0px); } 50% { transform: translateY(-10px); } 100% { transform: translateY(0px); } }
         
-        .stars-balance { display: inline-flex; align-items: center; background: rgba(0,0,0,0.2); padding: 5px 12px; border-radius: 20px; font-weight: bold; color: var(--gold); position: absolute; top: 15px; right: 15px; }
+        .stars-balance { display: inline-flex; align-items: center; background: rgba(0,0,0,0.2); padding: 5px 12px; border-radius: 20px; font-weight: bold; color: var(--gold); position: absolute; top: 15px; right: 15px; gap: 5px; }
         
         .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; padding: 0 15px 100px; margin-top: 10px; }
         .card { background-color: var(--card-bg); border-radius: 12px; aspect-ratio: 1; display: flex; align-items: center; justify-content: center; position: relative; overflow: hidden; border: 1px solid transparent; transition: all 0.2s; }
@@ -293,7 +239,7 @@ app.get('/', (req, res) => {
         .nav-item { padding: 10px 20px; border-radius: 15px; color: var(--secondary-text); text-decoration: none; font-size: 14px; display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer; }
         .nav-item.active { background-color: var(--card-bg); color: var(--accent); }
 
-        /* MODAL COMMON */
+        /* MODAL */
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: var(--modal-overlay); z-index: 2000; flex-direction: column; }
         .modal.open { display: flex; animation: fadeIn 0.2s; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
@@ -301,7 +247,6 @@ app.get('/', (req, res) => {
         .modal-header-bg { position: relative; flex-shrink: 0; height: auto; min-height: 280px; display: flex; flex-direction: column; align-items: center; justify-content: center; background-color: #1a1a1a; transition: background 0.5s; overflow: hidden; padding-bottom: 20px; }
         .pattern-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0.1; background-size: 40px 40px; pointer-events: none; }
         .close-btn-float { position: absolute; top: 15px; right: 15px; background: rgba(0,0,0,0.3); color: #fff; border-radius: 20px; padding: 5px 12px; font-size: 14px; cursor: pointer; z-index: 10; }
-        
         .modal-main-icon { width: 140px; height: 140px; display: flex; align-items: center; justify-content: center; font-size: 80px; margin-bottom: 5px; margin-top: 10px; z-index: 2; filter: drop-shadow(0 0 20px rgba(0,0,0,0.5)); }
         
         .modal-title { font-size: 22px; font-weight: bold; margin: 0; z-index: 2; }
@@ -313,61 +258,38 @@ app.get('/', (req, res) => {
         .owner-info h4 { margin: 0; font-size: 14px; }
         .owner-info p { margin: 0; font-size: 12px; color: var(--secondary-text); }
         .btn-go { background: var(--accent); color: white; border: none; padding: 6px 12px; border-radius: 16px; font-size: 12px; font-weight: bold; }
+        
         .attributes-list { background: var(--card-bg); border-radius: 12px; overflow: hidden; }
         .attr-row { display: flex; align-items: center; padding: 12px 15px; border-bottom: 1px solid rgba(0,0,0,0.1); }
         .attr-row:last-child { border-bottom: none; }
         .attr-icon-box { width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; font-size: 20px; margin-right: 15px; }
         .attr-details { flex: 1; }
         .attr-name { font-size: 14px; font-weight: bold; display: block; }
-        .attr-value { font-size: 13px; color: var(--secondary-text); }
+        .attr-value { font-size: 13px; color: var(--secondary-text); display: flex; align-items: center; gap: 5px; }
         .val-blue { color: var(--accent); }
 
-        /* --- AUCTION MODAL (FULL) --- */
-        .auction-modal-content {
-            background-color: #18191d; 
-            width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; position: relative; padding-top: 20px;
-        }
+        /* AUCTION MODAL */
+        .auction-modal-content { background-color: #18191d; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; position: relative; padding-top: 20px; }
         .auction-header { width: 100%; text-align: center; position: relative; margin-bottom: 10px; flex-shrink: 0; }
         .auction-title { font-size: 20px; font-weight: bold; color: #fff; margin-bottom: 4px; }
         .auction-subtitle { font-size: 14px; color: #707579; }
         .auction-close { position: absolute; right: 20px; top: 0px; width: 28px; height: 28px; background: rgba(255,255,255,0.1); border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; color: #ccc; font-size: 16px; }
-        
-        /* Ценник ставки */
-        .auction-bid-tag {
-            background: #235c97; color: #ffffff; padding: 8px 20px; border-radius: 20px; font-weight: bold; font-size: 18px; margin-bottom: 10px;
-        }
-        
+        .auction-bid-tag { background: #235c97; color: #ffffff; padding: 8px 20px; border-radius: 20px; font-weight: bold; font-size: 18px; margin-bottom: 10px; display: flex; align-items: center; gap: 5px; }
         .auction-main-icon { width: 160px; height: 160px; margin-bottom: 15px; filter: drop-shadow(0 0 40px rgba(0,0,0,0.5)); flex-shrink: 0; }
-        
-        /* Слайдер ставки */
         .bid-slider-container { width: 85%; margin-bottom: 15px; flex-shrink: 0; }
-        input[type=range] {
-            width: 100%; -webkit-appearance: none; background: transparent;
-        }
-        input[type=range]::-webkit-slider-thumb {
-            -webkit-appearance: none; height: 20px; width: 20px; border-radius: 50%; background: #ffffff; cursor: pointer; margin-top: -8px; box-shadow: 0 0 5px rgba(0,0,0,0.5);
-        }
-        input[type=range]::-webkit-slider-runnable-track {
-            width: 100%; height: 6px; cursor: pointer; background: #2c2e33; border-radius: 3px;
-        }
-        
-        /* Список ставок (Скролл) */
-        .auction-bids-list {
-            flex: 1; width: 100%; overflow-y: auto; padding: 0 20px; box-sizing: border-box; margin-bottom: 10px;
-        }
-        .bid-row {
-            display: flex; align-items: center; padding: 8px 0; border-bottom: 1px solid #2b2f36;
-        }
+        input[type=range] { width: 100%; -webkit-appearance: none; background: transparent; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 20px; width: 20px; border-radius: 50%; background: #ffffff; cursor: pointer; margin-top: -8px; box-shadow: 0 0 5px rgba(0,0,0,0.5); }
+        input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 6px; cursor: pointer; background: #2c2e33; border-radius: 3px; }
+        .auction-bids-list { flex: 1; width: 100%; overflow-y: auto; padding: 0 20px; box-sizing: border-box; margin-bottom: 10px; }
+        .bid-row { display: flex; align-items: center; padding: 8px 0; border-bottom: 1px solid #2b2f36; }
         .bid-avatar { width: 36px; height: 36px; border-radius: 50%; margin-right: 12px; background: #333; object-fit: cover; }
         .bid-info { flex: 1; }
         .bid-name { font-size: 14px; font-weight: bold; color: #fff; }
-        .bid-amount { font-size: 14px; color: #ffc107; font-weight: bold; }
-        
-        .auction-footer {
-            width: 100%; padding: 20px; box-sizing: border-box; background: #18191d; flex-shrink: 0; border-top: 1px solid #2b2f36;
-        }
+        .bid-amount { font-size: 14px; color: #ffc107; font-weight: bold; display: flex; align-items: center; gap: 4px; }
+        .auction-footer { width: 100%; padding: 20px; box-sizing: border-box; background: #18191d; flex-shrink: 0; border-top: 1px solid #2b2f36; }
         .btn-auction { background: #1274c4; color: white; width: 100%; padding: 16px; border-radius: 12px; font-size: 16px; font-weight: 600; border: none; cursor: pointer; }
-        
+        .auction-info-text { color: #555; font-size: 13px; text-align: center; margin-bottom: 15px; }
+
         /* Victory Popup */
         .popup-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 3000; display: none; align-items: center; justify-content: center; }
         .popup-card { background: #1c242d; width: 80%; border-radius: 20px; padding: 25px; text-align: center; position: relative; animation: popIn 0.3s; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
@@ -380,7 +302,10 @@ app.get('/', (req, res) => {
 </head>
 <body>
 
-    <div class="stars-balance">⭐ <span id="balance">...</span></div>
+    <div class="stars-balance">
+        <dotlottie-wc src="https://lottie.host/f42e58f6-6962-4577-9b8a-356493ceb944/y8oP6MQR1T.lottie" style="width: 24px; height: 24px;" autoplay loop></dotlottie-wc>
+        <span id="balance">...</span>
+    </div>
 
     <div class="header">
         <div id="headerAvatarContainer">
@@ -397,7 +322,6 @@ app.get('/', (req, res) => {
         <div class="nav-item active" onclick="switchTab('store')" id="tab-store">🏪 магазин</div>
     </div>
 
-    <!-- STANDARD MODAL -->
     <div class="modal" id="modal">
         <div class="modal-header-bg" id="modalHeaderBg">
             <div class="pattern-overlay" id="patternOverlay"></div>
@@ -426,45 +350,40 @@ app.get('/', (req, res) => {
         </div>
     </div>
 
-    <!-- AUCTION MODAL (WITH SLIDER & REAL PLAYERS) -->
     <div class="modal" id="auctionModal">
         <div class="auction-modal-content">
             <div class="auction-header">
                 <div class="auction-title">Размещение ставки</div>
-                <div class="auction-subtitle" id="auctionTimer">Осталось 3 мин</div>
+                <div class="auction-subtitle" id="auctionTimer">Осталось 3 мин 00 сек</div>
                 <div class="auction-close" onclick="closeAuctionModal()">✕</div>
             </div>
             
-            <!-- Сумма ставки -->
-            <div class="auction-bid-tag" id="bidAmountDisplay">20000</div>
+            <div class="auction-bid-tag">
+                <dotlottie-wc src="https://lottie.host/f42e58f6-6962-4577-9b8a-356493ceb944/y8oP6MQR1T.lottie" style="width: 20px; height: 20px;" autoplay loop></dotlottie-wc>
+                <span id="bidAmountDisplay">20000</span>
+            </div>
             
-            <!-- Слайдер -->
             <div class="bid-slider-container">
                 <input type="range" id="bidSlider" min="20000" max="100000" step="100" value="20000" oninput="updateBidDisplay(this.value)">
             </div>
 
             <div class="auction-main-icon" id="auctionIcon"></div>
             
-            <!-- Список ставок (Мультиплеер) -->
-            <div class="auction-bids-list" id="bidsList">
-                <!-- Сюда прилетают ставки через сокеты -->
-            </div>
+            <div class="auction-bids-list" id="bidsList"></div>
             
             <div class="auction-footer">
+                <div class="auction-info-text">В каждом раунде будет разыграно <b>3 шт.</b></div>
                 <button class="btn-auction" onclick="placeBid()">Сделать ставку</button>
             </div>
         </div>
     </div>
 
-    <!-- VICTORY POPUP -->
     <div class="popup-overlay" id="victoryPopup">
         <div class="popup-card">
             <div class="popup-close-x" onclick="closeVictory()">✕</div>
             <div class="popup-confetti">🎉</div>
             <div class="popup-title">Победа!</div>
-            <div class="popup-desc">
-                Ваша ставка принята! Вы лидер в аукционе за <span id="winItemName">Item</span>.
-            </div>
+            <div class="popup-desc">Ваша ставка принята! Вы лидер в аукционе за <span id="winItemName">Item</span>.</div>
             <button class="popup-btn" onclick="closeVictory()">OK</button>
         </div>
     </div>
@@ -472,16 +391,13 @@ app.get('/', (req, res) => {
     <script>
         const tg = window.Telegram.WebApp;
         tg.expand();
-        const socket = io(); // Подключение к сокетам
+        const socket = io();
         
-        // --- ДАННЫЕ ЮЗЕРА ИЗ TELEGRAM ---
         const tgUser = tg.initDataUnsafe?.user;
         const USER_ID = tgUser ? tgUser.id : 123456;
         const USERNAME = tgUser ? (tgUser.username || tgUser.first_name) : "Guest";
-        // Получаем аватарку (если нет, используем заглушку)
         const PHOTO_URL = tgUser?.photo_url || "https://cdn-icons-png.flaticon.com/512/147/147144.png";
 
-        // Ставим аватарку в шапку сайта
         if(tgUser?.photo_url) {
             document.getElementById('headerAvatarContainer').innerHTML = \`<img src="\${PHOTO_URL}" class="user-avatar-header">\`;
         }
@@ -493,14 +409,16 @@ app.get('/', (req, res) => {
         let selectedItem = null;
         let currentBidValue = 20000;
 
-        const ICONS = { model: '💠', pattern: '🦄', bg: '⬛', price: '⭐' };
+        // Иконка Звезды (Lottie)
+        const STAR_ICON_HTML = \`<dotlottie-wc src="https://lottie.host/f42e58f6-6962-4577-9b8a-356493ceb944/y8oP6MQR1T.lottie" style="width: 18px; height: 18px; display:inline-block; vertical-align: middle;" autoplay loop></dotlottie-wc>\`;
+
+        const ICONS = { model: '💠', pattern: '🦄', price: STAR_ICON_HTML };
+        const BG_COLORS = { 'Black': '#111111', 'Midnight': '#191970', 'Forest': '#013220', 'Lava': '#4a0404' };
 
         function renderIcon(iconData, isLarge = false) {
             if (iconData.startsWith('http')) {
-                return \`<lottie-player src="\${iconData}" background="transparent" speed="1" style="width: 100%; height: 100%;" loop autoplay></lottie-player>\`;
-            } else {
-                return iconData;
-            }
+                return \`<lottie-player src="\${iconData}" background="transparent" speed="1" style="width: 100%; height: 100%;" loop autoplay class="lottie-anim"></lottie-player>\`;
+            } else { return iconData; }
         }
 
         const observer = new IntersectionObserver((entries) => {
@@ -515,7 +433,6 @@ app.get('/', (req, res) => {
         }
 
         async function init() {
-            // Логинимся и передаем аватарку
             const res = await fetch('/api/login', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -530,14 +447,12 @@ app.get('/', (req, res) => {
             storeItems = await shopRes.json();
             render();
             
-            // Настройка слайдера (макс значение = баланс пользователя)
             const slider = document.getElementById('bidSlider');
             slider.max = userBalance; 
         }
 
         function updateBalance() { 
             document.getElementById('balance').innerText = userBalance.toLocaleString();
-            // Обновляем макс ставку в слайдере
             document.getElementById('bidSlider').max = userBalance; 
         }
 
@@ -582,16 +497,10 @@ app.get('/', (req, res) => {
             observeLotties();
         }
 
-        // --- SOCKET LISTENER (Живые ставки) ---
-        socket.on('new_bid', (bidData) => {
-            // Добавляем новую ставку в список
-            addBidToList(bidData);
-        });
-        
+        socket.on('new_bid', (bidData) => { addBidToList(bidData); });
         socket.on('auction_history', (history) => {
             const list = document.getElementById('bidsList');
-            list.innerHTML = ''; // Чистим
-            // Рендерим историю (она приходит с сервера)
+            list.innerHTML = '';
             history.forEach(bid => addBidToList(bid));
         });
 
@@ -604,85 +513,84 @@ app.get('/', (req, res) => {
                 <div class="bid-info">
                     <div class="bid-name">\${bid.username}</div>
                 </div>
-                <div class="bid-amount">\${parseInt(bid.amount).toLocaleString()}</div>
+                <div class="bid-amount">\${STAR_ICON_HTML} \${parseInt(bid.amount).toLocaleString()}</div>
             \`;
-            // Добавляем в начало списка
             list.prepend(row);
         }
 
-        // --- AUCTION LOGIC ---
+        // --- REAL AUCTION TIMER ---
+        let auctionInterval;
+        function startAuctionTimer() {
+            let timeLeft = 180; // 3 минуты
+            const timerEl = document.getElementById('auctionTimer');
+            
+            if(auctionInterval) clearInterval(auctionInterval);
+            
+            function update() {
+                const m = Math.floor(timeLeft / 60);
+                const s = timeLeft % 60;
+                timerEl.innerText = \`Осталось \${m} мин \${s < 10 ? '0'+s : s} сек\`;
+                
+                if(timeLeft <= 0) {
+                    clearInterval(auctionInterval);
+                    timerEl.innerText = "Аукцион завершен";
+                }
+                timeLeft--;
+            }
+            update();
+            auctionInterval = setInterval(update, 1000);
+        }
+
         function openAuctionModal(item) {
             selectedItem = item;
             document.getElementById('auctionIcon').innerHTML = renderIcon(item.icon);
-            
-            // Сбрасываем список и подключаемся к комнате аукциона
-            document.getElementById('bidsList').innerHTML = '<div style="color:#777; text-align:center; padding:10px;">Загрузка ставок...</div>';
+            document.getElementById('bidsList').innerHTML = '<div style="color:#777; text-align:center; padding:10px;">Загрузка...</div>';
             socket.emit('join_auction', item.id);
             
-            // Сбрасываем слайдер
             const slider = document.getElementById('bidSlider');
-            slider.value = 20000; // Мин ставка
+            slider.value = 20000;
             updateBidDisplay(20000);
+            
+            startAuctionTimer(); // ЗАПУСК ТАЙМЕРА
             
             document.getElementById('auctionModal').classList.add('open');
         }
 
         function closeAuctionModal() {
+            if(auctionInterval) clearInterval(auctionInterval);
             document.getElementById('auctionModal').classList.remove('open');
         }
 
         async function placeBid() {
             const amount = currentBidValue;
-            if(amount > userBalance) {
-                alert("Недостаточно средств!");
-                return;
-            }
-
+            if(amount > userBalance) { alert("Недостаточно средств!"); return; }
             const res = await fetch('/api/bid', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ 
-                    tg_id: USER_ID, 
-                    item_id: selectedItem.id, 
-                    amount: amount, 
-                    username: USERNAME,
-                    photo_url: PHOTO_URL
-                })
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ tg_id: USER_ID, item_id: selectedItem.id, amount: amount, username: USERNAME, photo_url: PHOTO_URL })
             });
             const data = await res.json();
-            
             if(data.success) {
                 userBalance = data.newBalance;
                 updateBalance();
-                // Ставка улетит через сокеты и вернется нам в addBidToList
                 tg.HapticFeedback.notificationOccurred('success');
-            } else {
-                alert(data.error);
-            }
+            } else { alert(data.error); }
         }
 
-        function closeVictory() {
-            document.getElementById('victoryPopup').style.display = 'none';
-        }
+        function closeVictory() { document.getElementById('victoryPopup').style.display = 'none'; }
 
-        // --- STANDARD MODAL (MOON/MEDAL) ---
         function openModal(item) {
             selectedItem = item;
             const isMine = currentTab === 'gifts';
-            
             document.getElementById('mIcon').innerHTML = renderIcon(item.icon);
             document.getElementById('mTitle').innerText = item.name;
-            document.getElementById('mSubtitle').innerText = isMine 
-                ? \`предмет #\${item.serial_number}, выпущен @NFTGifter\` 
-                : 'Покупка из магазина';
-            
+            document.getElementById('mSubtitle').innerText = isMine ? \`предмет #\${item.serial_number}, выпущен @NFTGifter\` : 'Покупка из магазина';
             document.getElementById('ownerName').innerText = isMine ? item.original_owner : 'Магазин';
 
             const headerBg = document.getElementById('modalHeaderBg');
             const patternOverlay = document.getElementById('patternOverlay');
             
             if (isMine && item.is_upgraded) {
-                const bgMap = { 'Black': '#111', 'Midnight': '#191970', 'Forest': '#013220', 'Lava': '#4a0404' };
+                const bgMap = BG_COLORS;
                 headerBg.style.backgroundColor = bgMap[item.background] || '#1a1a1a';
                 if(item.pattern === 'Turkey') patternOverlay.style.backgroundImage = 'radial-gradient(#ffffff33 2px, transparent 2px)'; 
                 else if(item.pattern === 'Star') patternOverlay.style.backgroundImage = 'linear-gradient(45deg, #ffffff22 25%, transparent 25%)';
@@ -719,7 +627,12 @@ app.get('/', (req, res) => {
 
             if (isMine && item.is_upgraded) {
                 addAttrRow(list, ICONS.pattern, 'Узор', \`\${item.pattern} <span class="val-blue">\${item.rarity_pattern}%</span>\`);
-                addAttrRow(list, ICONS.bg, 'Фон', \`\${item.background} <span class="val-blue">\${item.rarity_bg}%</span>\`);
+                
+                // --- ЦВЕТНОЙ КВАДРАТИК ВМЕСТО ИКОНКИ ---
+                const bgColor = BG_COLORS[item.background] || '#000';
+                const bgSquare = \`<div style="width: 24px; height: 24px; background: \${bgColor}; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2);"></div>\`;
+                
+                addAttrRow(list, bgSquare, 'Фон', \`\${item.background} <span class="val-blue">\${item.rarity_bg}%</span>\`);
             } else if (isMine) {
                  addAttrRow(list, '❓', 'Состояние', 'Базовое');
             }
@@ -741,11 +654,7 @@ app.get('/', (req, res) => {
 
         async function handleAction() {
             if (currentTab === 'store') {
-                const res = await fetch('/api/buy', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ tg_id: USER_ID, item_id: selectedItem.id, username: USERNAME })
-                });
+                const res = await fetch('/api/buy', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ tg_id: USER_ID, item_id: selectedItem.id, username: USERNAME }) });
                 const data = await res.json();
                 if(data.success) {
                     userBalance = data.newBalance;
@@ -756,11 +665,7 @@ app.get('/', (req, res) => {
                 } else alert(data.error);
             } 
             else if (!selectedItem.is_upgraded) {
-                const res = await fetch('/api/upgrade', {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify({ tg_id: USER_ID, asset_id: selectedItem.id })
-                });
+                const res = await fetch('/api/upgrade', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ tg_id: USER_ID, asset_id: selectedItem.id }) });
                 const data = await res.json();
                 if(data.success) {
                     userBalance = data.newBalance;
@@ -778,7 +683,6 @@ app.get('/', (req, res) => {
                 tg.showPopup({title: 'Инфо', message: 'Скоро...', buttons: [{type: 'ok'}]});
             }
         }
-
         init();
     </script>
 </body>
