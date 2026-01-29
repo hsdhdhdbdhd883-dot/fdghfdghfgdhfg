@@ -646,7 +646,7 @@ app.get('/', (req, res) => {
             document.getElementById('mTitle').innerText = item.name;
             
             let subtitle = 'Покупка из магазина';
-            if(item.serial_number) subtitle = \`предмет #\${item.serial_number}, выпущен @NFTGifter\`;
+            if(item.serial_number) subtitle = \`предмет #\${item.serial_number}, выпущен @h3lix_official\`;
             document.getElementById('mSubtitle').innerText = subtitle;
             
             // Владелец
@@ -697,14 +697,12 @@ app.get('/', (req, res) => {
                 // Это чей-то подарок (мой или чужой)
                 if(isMine) {
                     if(!item.is_upgraded) {
-                        btnText.innerText = "Улучшить (2000 ⭐)";
-                        btnIcon.innerText = '⬆️';
+                        btnText.innerText = "Улучшить";
                         btn.style.background = 'linear-gradient(45deg, #ffc107, #ff9800)';
                         btn.style.color = '#000';
                         btn.onclick = handleAction;
                     } else {
                         btnText.innerText = "Продать (Скоро)";
-                        btnIcon.innerText = '🏷️';
                         btn.style.background = '#3f3f3f';
                         btn.style.color = '#fff';
                         btn.onclick = null;
@@ -715,7 +713,6 @@ app.get('/', (req, res) => {
                 } else {
                     // Чужой подарок - предложить сделку
                     btnText.innerText = "Предложить сделку";
-                    btnIcon.innerText = '$';
                     btn.style.background = '#3f3f3f';
                     btn.style.color = '#fff';
                     btn.onclick = openMakeOffer;
