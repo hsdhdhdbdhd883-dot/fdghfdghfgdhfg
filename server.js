@@ -233,6 +233,7 @@ app.get('/', (req, res) => {
         
         .ribbon { position: absolute; top: 10px; right: -28px; width: 100px; background: var(--gold); color: #000; text-align: center; font-size: 10px; font-weight: 800; transform: rotate(45deg); padding: 4px 0; z-index: 3;}
         .ribbon.auction { background: #3d60d8; color: white; }
+        .ribbon.serial { background: #ffc107; color: black; }
         
         .bottom-nav { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(30, 40, 50, 0.95); backdrop-filter: blur(10px); border-radius: 20px; padding: 5px; display: flex; gap: 5px; box-shadow: 0 5px 20px rgba(0,0,0,0.5); z-index: 1000; }
         .nav-item { padding: 10px 20px; border-radius: 15px; color: var(--secondary-text); text-decoration: none; font-size: 14px; display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer; }
@@ -487,8 +488,21 @@ app.get('/', (req, res) => {
                 }
                 
                 let ribbon = '';
-                if(currentTab === 'store' && item.type === 'auction') ribbon = '<div class="ribbon auction">AUCTION</div>';
-                if(currentTab === 'gifts' && item.is_upgraded) ribbon = '<div class="ribbon">UPGRADED</div>';
+                if(currentTab === 'store' && item.type === 'auction') {
+                    ribbon = '<div class="ribbon auction">AUCTION</div>';
+                } else if(currentTab === 'gifts' && item.is_upgraded) {
+                    // ИЗМЕНЕНИЕ 1: СЕРИЙНЫЙ НОМЕР ВМЕСТО "UPGRADED"
+                    ribbon = \`<div class="ribbon serial">#\${item.serial_number}</div>\`;
+                }
+
+                // ИЗМЕНЕНИЕ 2: ФОН КАРТОЧКИ ЕСЛИ УЛУЧШЕНО
+                if (currentTab === 'gifts' && item.is_upgraded && item.background) {
+                    const color = BG_COLORS[item.background];
+                    if (color) {
+                        card.style.background = \`linear-gradient(135deg, \${color}, #1a1a1a)\`;
+                        card.style.borderColor = 'rgba(255,255,255,0.1)';
+                    }
+                }
 
                 card.innerHTML = \`\${ribbon}<div class="card-icon">\${renderIcon(item.icon)}</div>\`;
                 grid.appendChild(card);
