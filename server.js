@@ -128,7 +128,7 @@ const PATTERNS = [
     { name: 'Turkey', rarity: 20 },
     { name: 'Star', rarity: 15 },
     { name: 'Hearts', rarity: 5 },
-    { name: 'Matrix', rarity: 2 }
+    { name: 'Matrix', rarity: 2 },
     { name: 'Test123', rarity: 0.01 }
 ];
 const BACKGROUNDS = [
