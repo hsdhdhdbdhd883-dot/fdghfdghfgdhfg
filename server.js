@@ -38,6 +38,9 @@ const MEDAL_VARIANTS = [
     'https://cdn.changes.tg/gifts/models/Victory%20Medal/lottie/The%20Founder.json'
 ];
 
+// IDs предметов, которые МОЖНО улучшать сейчас
+const UPGRADABLE_IDS = [1, 4]; // 1=Moon, 4=Medal. Остальные (Test, Brick...) нельзя.
+
 // --- БАЗА ДАННЫХ ---
 const db = new sqlite3.Database('database.db'); 
 
@@ -82,25 +85,31 @@ db.serialize(() => {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
-    // ТАБЛИЦА ПРЕДЛОЖЕНИЙ (OFFERS)
     db.run(`CREATE TABLE IF NOT EXISTS offers (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         asset_id INTEGER,
         buyer_id INTEGER,
         buyer_username TEXT,
         amount INTEGER,
-        status TEXT DEFAULT 'pending', -- pending, accepted, declined
+        status TEXT DEFAULT 'pending',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )`);
 
-    // Заполнение магазина
+    // ЗАПОЛНЕНИЕ МАГАЗИНА
     db.get("SELECT count(*) as count FROM shop_items", (err, row) => {
         if (row.count === 0) {
             const stmt = db.prepare("INSERT INTO shop_items (id, name, icon, price, type, max_supply) VALUES (?, ?, ?, ?, ?, ?)");
+            // Старые
             stmt.run(1, 'Astral Shard', 'https://cdn.changes.tg/gifts/models/Astral%20Shard/lottie/Original.json', 5000, 'gift', 10000);
-            stmt.run(2, 'Test', 'https://cdn.changes.tg/gifts/models/Big%20Year/lottie/Telegram.json', 2500, 'gift', 10000);
+            stmt.run(2, 'Test Gift', 'https://cdn.changes.tg/gifts/models/Big%20Year/lottie/Telegram.json', 2500, 'gift', 10000);
             stmt.run(4, 'Victory Medal', 'https://cdn.changes.tg/gifts/models/Victory%20Medal/lottie/Original.json', 10000, 'gift', 10000);
             stmt.run(5, 'B-Day Candle', 'https://cdn.changes.tg/gifts/models/B-Day%20Candle/lottie/Original.json', 20000, 'auction', 100);
+            
+            // НОВЫЕ (ID 6, 7, 8)
+            stmt.run(6, 'Artisan Brick', 'https://cdn.changes.tg/gifts/models/Artisan%20Brick/lottie/Original.json', 1500, 'gift', 10000);
+            stmt.run(7, 'Clover Pin', 'https://cdn.changes.tg/gifts/models/Clover%20Pin/lottie/Original.json', 3000, 'gift', 10000);
+            stmt.run(8, 'Bow Tie', 'https://cdn.changes.tg/gifts/models/Bow%20Tie/lottie/Original.json', 4500, 'gift', 10000);
+            
             stmt.finalize();
         }
     });
@@ -150,7 +159,6 @@ app.post('/api/login', (req, res) => {
 });
 
 function sendUserData(res, tg_id, username, balance) {
-    // Получаем мои предметы
     db.all(`SELECT ua.*, si.name, COALESCE(ua.custom_icon, si.icon) as icon, si.price as base_price, si.type as item_type 
             FROM user_assets ua 
             JOIN shop_items si ON ua.item_id = si.id 
@@ -160,82 +168,58 @@ function sendUserData(res, tg_id, username, balance) {
 }
 
 app.get('/api/shop', (req, res) => { 
-    // Получаем магазин с подсчетом купленных
-    db.all(`
-        SELECT si.*, 
-        (SELECT COUNT(*) FROM user_assets WHERE item_id = si.id) as minted_count 
-        FROM shop_items si`, (err, rows) => { res.json(rows); }); 
+    db.all(`SELECT si.*, (SELECT COUNT(*) FROM user_assets WHERE item_id = si.id) as minted_count FROM shop_items si`, (err, rows) => { res.json(rows); }); 
 });
 
-// Глобальная лента подарков (для поиска чужих)
 app.get('/api/feed', (req, res) => {
+    // ОПТИМИЗАЦИЯ: LIMIT 30
     db.all(`
         SELECT ua.*, u.username as owner_name, u.photo_url as owner_photo, si.name, COALESCE(ua.custom_icon, si.icon) as icon, si.price as base_price 
         FROM user_assets ua 
         JOIN shop_items si ON ua.item_id = si.id 
         JOIN users u ON ua.user_id = u.telegram_id
-        ORDER BY ua.id DESC LIMIT 50`, (err, rows) => {
+        ORDER BY ua.id DESC LIMIT 30`, (err, rows) => {
             res.json(rows);
     });
 });
 
-// Получить предложения для конкретного ассета
 app.get('/api/offers/:assetId', (req, res) => {
     db.all("SELECT * FROM offers WHERE asset_id = ? AND status = 'pending' ORDER BY amount DESC", [req.params.assetId], (err, rows) => {
         res.json(rows);
     });
 });
 
-// Сделать предложение
 app.post('/api/make_offer', (req, res) => {
     const { buyer_id, buyer_username, asset_id, amount } = req.body;
     db.get("SELECT * FROM users WHERE telegram_id = ?", [buyer_id], (err, user) => {
         if(user.balance < amount) return res.json({error: "Недостаточно средств"});
-        
-        // Проверяем, не владеет ли он уже
         db.get("SELECT * FROM user_assets WHERE id = ?", [asset_id], (err, asset) => {
             if(asset.user_id == buyer_id) return res.json({error: "Это ваш предмет!"});
-            
-            db.run(`INSERT INTO offers (asset_id, buyer_id, buyer_username, amount) VALUES (?, ?, ?, ?)`, 
-                [asset_id, buyer_id, buyer_username, amount], 
-                () => res.json({success: true})
-            );
+            db.run(`INSERT INTO offers (asset_id, buyer_id, buyer_username, amount) VALUES (?, ?, ?, ?)`, [asset_id, buyer_id, buyer_username, amount], () => res.json({success: true}));
         });
     });
 });
 
-// Ответить на предложение (Принять/Отклонить)
 app.post('/api/respond_offer', (req, res) => {
-    const { offer_id, action, seller_id } = req.body; // action: 'accept' | 'decline'
-    
+    const { offer_id, action, seller_id } = req.body;
     db.get("SELECT * FROM offers WHERE id = ?", [offer_id], (err, offer) => {
-        if(!offer || offer.status !== 'pending') return res.json({error: "Предложение неактуально"});
-        
+        if(!offer || offer.status !== 'pending') return res.json({error: "Неактуально"});
         if(action === 'decline') {
             db.run("UPDATE offers SET status = 'declined' WHERE id = ?", [offer_id]);
             return res.json({success: true, action: 'declined'});
         }
-        
         if(action === 'accept') {
-            // Транзакция:
-            // 1. Списываем у покупателя
             db.get("SELECT * FROM users WHERE telegram_id = ?", [offer.buyer_id], (err, buyer) => {
-                if(buyer.balance < offer.amount) return res.json({error: "У покупателя больше нет денег"});
-                
+                if(buyer.balance < offer.amount) return res.json({error: "У покупателя нет денег"});
                 db.run("UPDATE users SET balance = balance - ? WHERE telegram_id = ?", [offer.amount, offer.buyer_id]);
-                // 2. Начисляем продавцу
                 db.run("UPDATE users SET balance = balance + ? WHERE telegram_id = ?", [offer.amount, seller_id]);
-                // 3. Передаем ассет
                 db.run("UPDATE user_assets SET user_id = ? WHERE id = ?", [offer.buyer_id, offer.asset_id]);
-                // 4. Закрываем оффер
                 db.run("UPDATE offers SET status = 'accepted' WHERE id = ?", [offer_id]);
-                
                 res.json({success: true, action: 'accepted'});
             });
         }
     });
 });
-
 
 app.post('/api/buy', (req, res) => {
     const { tg_id, item_id, username } = req.body;
@@ -243,11 +227,8 @@ app.post('/api/buy', (req, res) => {
         db.get("SELECT * FROM shop_items WHERE id = ?", [item_id], (err, item) => {
             if (user.balance < item.price) return res.json({ error: "Мало звезд" });
             if (item.type === 'auction') return res.json({ error: "Только аукцион!" });
-            
-            // ПРОВЕРКА ЛИМИТА 10000
             db.get("SELECT COUNT(*) as count FROM user_assets WHERE item_id = ?", [item_id], (err, row) => {
-                if (row.count >= item.max_supply) return res.json({ error: "Распродано! (Sold Out)" });
-
+                if (row.count >= item.max_supply) return res.json({ error: "Распродано!" });
                 const newBalance = user.balance - item.price;
                 db.run("UPDATE users SET balance = ? WHERE telegram_id = ?", [newBalance, tg_id]);
                 const serial = row.count + 1;
@@ -280,13 +261,21 @@ app.post('/api/upgrade', (req, res) => {
     const UPGRADE_PRICE = 2000; 
     db.get("SELECT * FROM users WHERE telegram_id = ?", [tg_id], (err, user) => {
         db.get("SELECT * FROM user_assets WHERE id = ?", [asset_id], (err, asset) => {
+            
+            // --- ПРОВЕРКА НА ВОЗМОЖНОСТЬ УЛУЧШЕНИЯ ---
+            if (!UPGRADABLE_IDS.includes(asset.item_id)) {
+                return res.json({ error: "Улучшение для этого предмета пока недоступно!" });
+            }
+
             if (asset.is_upgraded === 1) return res.json({ error: "Уже улучшено!" });
             if (user.balance < UPGRADE_PRICE) return res.json({ error: "Мало звезд" });
+            
             const pat = getRandomAttr(PATTERNS);
             const bg = getRandomAttr(BACKGROUNDS);
             let newIcon = null;
             if (asset.item_id === 1) newIcon = getRandomAttr(MOON_VARIANTS);
             else if (asset.item_id === 4) newIcon = getRandomAttr(MEDAL_VARIANTS);
+            
             const newBalance = user.balance - UPGRADE_PRICE;
             db.run("UPDATE users SET balance = ? WHERE telegram_id = ?", [newBalance, tg_id]);
             db.run(`UPDATE user_assets SET pattern = ?, rarity_pattern = ?, background = ?, rarity_bg = ?, is_upgraded = 1, custom_icon = ? WHERE id = ?`, 
@@ -306,7 +295,7 @@ app.get('/', (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <!-- LOTTIE & DOTLOTTIE -->
+    <!-- LOTTIE PLAYER -->
     <script src="https://unpkg.com/@lottiefiles/lottie-player@latest/dist/lottie-player.js"></script>
     <script src="https://unpkg.com/@lottiefiles/dotlottie-wc@0.8.11/dist/dotlottie-wc.js" type="module"></script>
     
@@ -335,12 +324,11 @@ app.get('/', (req, res) => {
         .nav-item { padding: 10px 20px; border-radius: 15px; color: var(--secondary-text); text-decoration: none; font-size: 14px; display: flex; flex-direction: column; align-items: center; gap: 4px; cursor: pointer; }
         .nav-item.active { background-color: var(--card-bg); color: var(--accent); }
 
-        /* MODAL & PATTERN */
+        /* MODAL */
         .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: var(--modal-overlay); z-index: 2000; flex-direction: column; }
         .modal.open { display: flex; animation: fadeIn 0.2s; }
         @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
-        /* ПАТТЕРН С КВАДРАТИКАМИ (ПОЛУПРОЗРАЧНЫЙ) */
         .modal-header-bg { 
             position: relative; flex-shrink: 0; height: auto; min-height: 280px; 
             display: flex; flex-direction: column; align-items: center; justify-content: center; 
@@ -350,17 +338,17 @@ app.get('/', (req, res) => {
             background-position: 0 0, 15px 15px;
             transition: background 0.5s; overflow: hidden; padding-bottom: 20px; 
         }
-        
-        /* Слой для уникального узора (если улучшен) */
         .pattern-overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; opacity: 0.15; background-size: 50px 50px; pointer-events: none; }
-        
         .close-btn-float { position: absolute; top: 15px; right: 15px; background: rgba(0,0,0,0.3); color: #fff; border-radius: 20px; padding: 5px 12px; font-size: 14px; cursor: pointer; z-index: 10; }
         .modal-main-icon { width: 140px; height: 140px; display: flex; align-items: center; justify-content: center; font-size: 80px; margin-bottom: 5px; margin-top: 10px; z-index: 2; filter: drop-shadow(0 0 20px rgba(0,0,0,0.5)); }
+        
         .modal-title { font-size: 22px; font-weight: bold; margin: 0; z-index: 2; }
         .modal-subtitle { color: rgba(255,255,255,0.6); font-size: 13px; margin-top: 2px; z-index: 2; }
         .modal-body { background: var(--bg-color); flex: 1; padding: 15px; border-radius: 20px 20px 0 0; margin-top: -20px; z-index: 5; position: relative; overflow-y: auto; }
         
         .action-btn { background: #4b4b4b; color: white; border-radius: 12px; padding: 12px; text-align: center; font-weight: bold; margin-bottom: 15px; display: flex; flex-direction: column; align-items: center; justify-content: center; cursor: pointer; border: 1px solid rgba(255,255,255,0.1); }
+        .action-btn.disabled { opacity: 0.6; cursor: not-allowed; }
+        
         .owner-row { background: var(--card-bg); border-radius: 12px; padding: 10px 15px; display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; }
         .owner-info h4 { margin: 0; font-size: 14px; }
         .owner-info p { margin: 0; font-size: 12px; color: var(--secondary-text); }
@@ -375,14 +363,12 @@ app.get('/', (req, res) => {
         .attr-value { font-size: 13px; color: var(--secondary-text); display: flex; align-items: center; gap: 5px; }
         .val-blue { color: var(--accent); }
 
-        /* LIST OF OFFERS */
         .offers-title { font-size: 16px; font-weight: bold; margin-bottom: 10px; color: #fff; text-align: center; }
         .offer-item { background: var(--card-bg); padding: 12px; border-radius: 10px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; border: 1px solid rgba(255,255,255,0.05); }
         .offer-left { display: flex; align-items: center; gap: 10px; }
         .offer-icon { font-size: 20px; }
         .btn-offer-accept { background: #2ea6ff; border:none; color:white; padding: 6px 12px; border-radius: 8px; font-weight: bold; font-size: 12px; cursor: pointer;}
 
-        /* POPUPS */
         .popup-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 3000; display: none; align-items: center; justify-content: center; }
         .popup-card { background: #1c242d; width: 85%; border-radius: 20px; padding: 25px; text-align: center; position: relative; animation: popIn 0.3s; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
         @keyframes popIn { from { transform: scale(0.8); opacity: 0; } to { transform: scale(1); opacity: 1; } }
@@ -394,11 +380,31 @@ app.get('/', (req, res) => {
         .btn-blue { background: #2ea6ff; color: white; }
         .btn-red { background: #ff5252; color: white; }
         .popup-confetti { font-size: 50px; margin-bottom: 15px; display: block; }
-        .popup-item-icon { width: 80px; height: 80px; margin: 0 auto 15px; display: block; }
-
-        /* MAKE OFFER INPUT */
+        .popup-close-x { position: absolute; top: 15px; right: 15px; background: rgba(255,255,255,0.1); width: 24px; height: 24px; border-radius: 50%; color: #aaa; display: flex; align-items: center; justify-content: center; cursor: pointer; }
         .input-group { margin-bottom: 20px; }
         .input-field { width: 100%; background: #2b2f36; border: 1px solid #3f444e; color: white; padding: 12px; border-radius: 10px; font-size: 16px; box-sizing: border-box; }
+        
+        /* AUCTION CSS */
+        .auction-modal-content { background-color: #18191d; width: 100%; height: 100%; display: flex; flex-direction: column; align-items: center; position: relative; padding-top: 20px; }
+        .auction-header { width: 100%; text-align: center; position: relative; margin-bottom: 10px; flex-shrink: 0; }
+        .auction-title { font-size: 20px; font-weight: bold; color: #fff; margin-bottom: 4px; }
+        .auction-subtitle { font-size: 14px; color: #707579; }
+        .auction-close { position: absolute; right: 20px; top: 0px; width: 28px; height: 28px; background: rgba(255,255,255,0.1); border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; color: #ccc; font-size: 16px; }
+        .auction-bid-tag { background: #235c97; color: #ffffff; padding: 8px 20px; border-radius: 20px; font-weight: bold; font-size: 18px; margin-bottom: 10px; display: flex; align-items: center; gap: 5px; }
+        .auction-main-icon { width: 160px; height: 160px; margin-bottom: 15px; filter: drop-shadow(0 0 40px rgba(0,0,0,0.5)); flex-shrink: 0; }
+        .bid-slider-container { width: 85%; margin-bottom: 15px; flex-shrink: 0; }
+        input[type=range] { width: 100%; -webkit-appearance: none; background: transparent; }
+        input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; height: 20px; width: 20px; border-radius: 50%; background: #ffffff; cursor: pointer; margin-top: -8px; box-shadow: 0 0 5px rgba(0,0,0,0.5); }
+        input[type=range]::-webkit-slider-runnable-track { width: 100%; height: 6px; cursor: pointer; background: #2c2e33; border-radius: 3px; }
+        .auction-bids-list { flex: 1; width: 100%; overflow-y: auto; padding: 0 20px; box-sizing: border-box; margin-bottom: 10px; }
+        .bid-row { display: flex; align-items: center; padding: 8px 0; border-bottom: 1px solid #2b2f36; }
+        .bid-avatar { width: 36px; height: 36px; border-radius: 50%; margin-right: 12px; background: #333; object-fit: cover; }
+        .bid-info { flex: 1; }
+        .bid-name { font-size: 14px; font-weight: bold; color: #fff; }
+        .bid-amount { font-size: 14px; color: #ffc107; font-weight: bold; display: flex; align-items: center; gap: 4px; }
+        .auction-footer { width: 100%; padding: 20px; box-sizing: border-box; background: #18191d; flex-shrink: 0; border-top: 1px solid #2b2f36; }
+        .btn-auction { background: #1274c4; color: white; width: 100%; padding: 16px; border-radius: 12px; font-size: 16px; font-weight: 600; border: none; cursor: pointer; }
+        .auction-info-text { color: #555; font-size: 13px; text-align: center; margin-bottom: 15px; }
     </style>
 </head>
 <body>
@@ -413,7 +419,7 @@ app.get('/', (req, res) => {
              <div class="avatar-placeholder">✊</div>
         </div>
         <h1>Магазин</h1>
-        <p style="color:#707579; font-size:14px">Test</p>
+        <p style="color:#707579; font-size:14px">OpenGifter</p>
     </div>
 
     <div class="grid" id="grid"></div>
@@ -436,13 +442,11 @@ app.get('/', (req, res) => {
         </div>
 
         <div class="modal-body">
-            <!-- Действие (Улучшить / Купить / Предложить) -->
             <div class="action-btn" id="actionBtn" onclick="handleAction()">
                 <div id="actionIcon" class="action-icon"></div>
                 <div id="actionText"></div>
             </div>
 
-            <!-- Владелец -->
             <div class="owner-row" id="ownerRow">
                 <div class="owner-info">
                     <h4>Владелец</h4>
@@ -451,10 +455,8 @@ app.get('/', (req, res) => {
                 <button class="btn-go">Перейти</button>
             </div>
 
-            <!-- Атрибуты -->
             <div class="attributes-list" id="attrList"></div>
 
-            <!-- СПИСОК ПРЕДЛОЖЕНИЙ (ТОЛЬКО ДЛЯ ВЛАДЕЛЬЦА) -->
             <div id="offersContainer" style="display:none;">
                 <div class="offers-title">Лучшие предложения</div>
                 <div id="offersList"></div>
@@ -462,27 +464,51 @@ app.get('/', (req, res) => {
         </div>
     </div>
 
-    <!-- MAKE OFFER POPUP -->
+    <!-- AUCTION MODAL -->
+    <div class="modal" id="auctionModal">
+        <div class="auction-modal-content">
+            <div class="auction-header">
+                <div class="auction-title">Размещение ставки</div>
+                <div class="auction-subtitle" id="auctionTimer">Осталось 3 мин 00 сек</div>
+                <div class="auction-close" onclick="closeAuctionModal()">✕</div>
+            </div>
+            
+            <div class="auction-bid-tag">
+                <dotlottie-wc src="https://lottie.host/f42e58f6-6962-4577-9b8a-356493ceb944/y8oP6MQR1T.lottie" style="width: 20px; height: 20px;" autoplay loop></dotlottie-wc>
+                <span id="bidAmountDisplay">20000</span>
+            </div>
+            
+            <div class="bid-slider-container">
+                <input type="range" id="bidSlider" min="20000" max="100000" step="100" value="20000" oninput="updateBidDisplay(this.value)">
+            </div>
+
+            <div class="auction-main-icon" id="auctionIcon"></div>
+            
+            <div class="auction-bids-list" id="bidsList"></div>
+            
+            <div class="auction-footer">
+                <div class="auction-info-text">В каждом раунде будет разыграно <b>3 шт.</b></div>
+                <button class="btn-auction" onclick="placeBid()">Сделать ставку</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- POPUPS -->
     <div class="popup-overlay" id="makeOfferPopup">
         <div class="popup-card">
             <div class="popup-close-x" onclick="closeMakeOffer()">✕</div>
             <div class="popup-title">Предложить сделку</div>
             <div class="popup-desc">Сколько вы готовы заплатить?</div>
-            <div class="input-group">
-                <input type="number" id="offerInput" class="input-field" placeholder="Сумма в звездах">
-            </div>
+            <div class="input-group"><input type="number" id="offerInput" class="input-field" placeholder="Сумма в звездах"></div>
             <button class="popup-btn btn-blue" onclick="sendOffer()">Предложить</button>
         </div>
     </div>
 
-    <!-- ACCEPT/DECLINE POPUP -->
     <div class="popup-overlay" id="respondPopup">
         <div class="popup-card">
-            <div class="popup-main-icon" id="respIcon"></div> <!-- Icon here -->
             <div class="popup-title" id="respTitle">Активное предложение</div>
-            <div class="popup-desc" id="respDesc">Михаил хочет купить...</div>
-            <div style="font-size: 24px; font-weight: bold; color: #ffc107; margin-bottom: 20px;" id="respPrice">123 ⭐️</div>
-            
+            <div class="popup-desc" id="respDesc"></div>
+            <div style="font-size: 24px; font-weight: bold; color: #ffc107; margin-bottom: 20px;" id="respPrice"></div>
             <div class="popup-btn-row">
                 <button class="popup-btn btn-primary" onclick="confirmDecline()">Отклонить</button>
                 <button class="popup-btn btn-blue" onclick="acceptOffer()">Принять</button>
@@ -490,7 +516,6 @@ app.get('/', (req, res) => {
         </div>
     </div>
 
-    <!-- DECLINE CONFIRM POPUP -->
     <div class="popup-overlay" id="declineConfirmPopup">
         <div class="popup-card">
             <div class="popup-title">Отказаться?</div>
@@ -502,13 +527,22 @@ app.get('/', (req, res) => {
         </div>
     </div>
 
-    <!-- LOADING / SUCCESS POPUP -->
     <div class="popup-overlay" id="msgPopup">
         <div class="popup-card">
             <div class="popup-confetti" id="msgIcon">🎉</div>
             <div class="popup-title" id="msgTitle">Успех</div>
             <div class="popup-desc" id="msgDesc"></div>
             <button class="popup-btn btn-primary" onclick="closeMsg()">OK</button>
+        </div>
+    </div>
+
+    <div class="popup-overlay" id="victoryPopup">
+        <div class="popup-card">
+            <div class="popup-close-x" onclick="closeVictory()">✕</div>
+            <div class="popup-confetti">🎉</div>
+            <div class="popup-title">Победа!</div>
+            <div class="popup-desc">Ваша ставка принята! Вы лидер в аукционе за <span id="winItemName">Item</span>.</div>
+            <button class="popup-btn" onclick="closeVictory()">OK</button>
         </div>
     </div>
 
@@ -532,10 +566,22 @@ app.get('/', (req, res) => {
         let feedAssets = [];
         let currentTab = 'store'; 
         let selectedItem = null;
-        let selectedOffer = null; // Текущее выбранное предложение для ответа
+        let selectedOffer = null;
+        let currentBidValue = 20000;
+
+        // ПРЕДМЕТЫ, КОТОРЫЕ МОЖНО УЛУЧШАТЬ (CLIENT SIDE CHECK FOR BUTTON)
+        const UPGRADABLE_IDS = [1, 4];
 
         const STAR_ICON_HTML = \`<dotlottie-wc src="https://lottie.host/f42e58f6-6962-4577-9b8a-356493ceb944/y8oP6MQR1T.lottie" style="width: 18px; height: 18px; display:inline-block; vertical-align: middle;" autoplay loop></dotlottie-wc>\`;
         const BG_COLORS = { 'Black': '#111111', 'Midnight': '#191970', 'Forest': '#013220', 'Lava': '#4a0404' };
+
+        // ОПТИМИЗАЦИЯ: ОДИН OBSERVER
+        let observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                const player = entry.target;
+                if (entry.isIntersecting) player.play(); else player.pause();
+            });
+        }, { threshold: 0.1 });
 
         function renderIcon(iconData) {
             if (iconData.startsWith('http')) {
@@ -543,14 +589,10 @@ app.get('/', (req, res) => {
             } else { return iconData; }
         }
 
-        const observer = new IntersectionObserver((entries) => {
-            entries.forEach(entry => {
-                const player = entry.target;
-                if (entry.isIntersecting) player.play(); else player.pause();
-            });
-        }, { threshold: 0.1 });
-
         function observeLotties() {
+            // Сначала отключаем старых, чтобы не текла память
+            observer.disconnect();
+            // Подключаем новых
             document.querySelectorAll('lottie-player').forEach(player => observer.observe(player));
         }
 
@@ -568,14 +610,24 @@ app.get('/', (req, res) => {
             const shopRes = await fetch('/api/shop');
             storeItems = await shopRes.json();
             
-            // Загружаем ленту сразу
             const feedRes = await fetch('/api/feed');
             feedAssets = await feedRes.json();
 
             render();
+            
+            const slider = document.getElementById('bidSlider');
+            slider.max = userBalance; 
         }
 
-        function updateBalance() { document.getElementById('balance').innerText = userBalance.toLocaleString(); }
+        function updateBalance() { 
+            document.getElementById('balance').innerText = userBalance.toLocaleString();
+            document.getElementById('bidSlider').max = userBalance; 
+        }
+
+        function updateBidDisplay(val) {
+            currentBidValue = parseInt(val);
+            document.getElementById('bidAmountDisplay').innerText = currentBidValue.toLocaleString();
+        }
 
         function switchTab(tab) {
             currentTab = tab;
@@ -585,18 +637,14 @@ app.get('/', (req, res) => {
             render();
         }
 
-        async function render() {
+        function render() {
             const grid = document.getElementById('grid');
             grid.innerHTML = '';
             
             let data = [];
             if(currentTab === 'store') data = storeItems;
             else if(currentTab === 'gifts') data = myAssets;
-            else if(currentTab === 'feed') {
-                const feedRes = await fetch('/api/feed');
-                feedAssets = await feedRes.json();
-                data = feedAssets;
-            }
+            else if(currentTab === 'feed') data = feedAssets;
 
             if(data.length === 0 && currentTab === 'gifts') {
                 grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:#777;padding:20px">Пусто</div>';
@@ -606,20 +654,18 @@ app.get('/', (req, res) => {
             data.forEach(item => {
                 const card = document.createElement('div');
                 card.className = 'card';
-                card.onclick = () => openModal(item); // Используем единую модалку для всего
+                card.onclick = () => openModal(item);
                 
                 let ribbon = '';
                 if(currentTab === 'store') {
                     if(item.type === 'auction') ribbon = '<div class="ribbon auction">AUCTION</div>';
                     else if (item.minted_count >= item.max_supply) ribbon = '<div class="ribbon" style="background:#555">SOLD</div>';
                 } else {
-                    // Для ленты и подарков показываем номер
                     if(item.is_upgraded || item.serial_number) {
                         ribbon = \`<div class="ribbon serial">#\${item.serial_number}</div>\`;
                     }
                 }
 
-                // Фон карточки
                 if ((currentTab === 'gifts' || currentTab === 'feed') && item.is_upgraded && item.background) {
                     const color = BG_COLORS[item.background];
                     if (color) {
@@ -631,13 +677,12 @@ app.get('/', (req, res) => {
                 card.innerHTML = \`\${ribbon}<div class="card-icon">\${renderIcon(item.icon)}</div>\`;
                 grid.appendChild(card);
             });
-            observeLotties();
+            observeLotties(); // ВАЖНО: ЗАПУСК ОПТИМИЗАЦИИ
         }
 
         async function openModal(item) {
             selectedItem = item;
             
-            // Определяем, мой ли это предмет (в магазине "нет", в подарках "да", в ленте - проверяем ID)
             let isMine = false;
             if(currentTab === 'gifts') isMine = true;
             if(currentTab === 'feed' && item.user_id == USER_ID) isMine = true;
@@ -649,15 +694,13 @@ app.get('/', (req, res) => {
             if(item.serial_number) subtitle = \`предмет #\${item.serial_number}, выпущен @h3lix_official\`;
             document.getElementById('mSubtitle').innerText = subtitle;
             
-            // Владелец
             let ownerName = "Магазин";
-            if(item.owner_name) ownerName = item.owner_name; // из feed
-            else if(item.original_owner) ownerName = item.original_owner; // legacy
+            if(item.owner_name) ownerName = item.owner_name;
+            else if(item.original_owner) ownerName = item.original_owner;
             if(isMine) ownerName = "Вы";
             
             document.getElementById('ownerName').innerText = ownerName;
 
-            // Фон
             const headerBg = document.getElementById('modalHeaderBg');
             const patternOverlay = document.getElementById('patternOverlay');
             
@@ -672,54 +715,60 @@ app.get('/', (req, res) => {
                 patternOverlay.style.backgroundImage = 'none';
             }
 
-            // Кнопка действия
             const btn = document.getElementById('actionBtn');
             const btnText = document.getElementById('actionText');
             const btnIcon = document.getElementById('actionIcon');
             const offersContainer = document.getElementById('offersContainer');
             offersContainer.style.display = 'none';
+            btn.classList.remove('disabled');
 
             if(currentTab === 'store') {
                 if(item.type === 'auction') {
                     btnText.innerText = "Аукцион (Скоро)";
-                    btnIcon.innerText = '⏳';
+                    btn.onclick = () => openAuctionModal(item);
                 } else if(item.minted_count >= item.max_supply) {
                     btnText.innerText = "Распродано";
-                    btnIcon.innerText = '🔒';
                     btn.style.background = '#333';
+                    btn.onclick = null;
                 } else {
                     btnText.innerText = \`Купить за \${item.price} звёзд\`;
                     btnIcon.innerText = '🛒';
                     btn.style.background = '#2ea6ff';
+                    btn.onclick = handleAction;
                 }
-                btn.onclick = handleAction;
             } else {
-                // Это чей-то подарок (мой или чужой)
                 if(isMine) {
                     if(!item.is_upgraded) {
-                        btnText.innerText = "Улучшить";
-                        btn.style.background = 'linear-gradient(45deg, #ffc107, #ff9800)';
-                        btn.style.color = '#000';
-                        btn.onclick = handleAction;
+                        // ПРОВЕРКА: МОЖНО ЛИ УЛУЧШАТЬ?
+                        if (UPGRADABLE_IDS.includes(item.item_id || item.id)) {
+                            btnText.innerText = "Улучшить";
+                            btn.style.background = 'linear-gradient(45deg, #ffc107, #ff9800)';
+                            btn.style.color = '#000';
+                            btn.onclick = handleAction;
+                        } else {
+                            // ЗАБЛОКИРОВАНО
+                            btnText.innerText = "Скоро...";
+                            btn.style.background = '#3f3f3f';
+                            btn.style.color = '#777';
+                            btn.classList.add('disabled');
+                            btn.onclick = null;
+                        }
                     } else {
                         btnText.innerText = "Продать (Скоро)";
                         btn.style.background = '#3f3f3f';
                         btn.style.color = '#fff';
                         btn.onclick = null;
-                        
-                        // ЗАГРУЗКА ПРЕДЛОЖЕНИЙ
                         loadOffers(item.id);
                     }
                 } else {
-                    // Чужой подарок - предложить сделку
                     btnText.innerText = "Предложить сделку";
+                    btnIcon.innerText = '$';
                     btn.style.background = '#3f3f3f';
                     btn.style.color = '#fff';
                     btn.onclick = openMakeOffer;
                 }
             }
 
-            // Атрибуты
             const list = document.getElementById('attrList');
             list.innerHTML = '';
             const modelIcon = item.icon.startsWith('http') ? '💠' : item.icon;
@@ -742,67 +791,38 @@ app.get('/', (req, res) => {
         }
 
         // --- P2P LOGIC ---
-
-        function openMakeOffer() {
-            document.getElementById('makeOfferPopup').style.display = 'flex';
-        }
-        function closeMakeOffer() {
-            document.getElementById('makeOfferPopup').style.display = 'none';
-        }
+        function openMakeOffer() { document.getElementById('makeOfferPopup').style.display = 'flex'; }
+        function closeMakeOffer() { document.getElementById('makeOfferPopup').style.display = 'none'; }
         async function sendOffer() {
             const amount = document.getElementById('offerInput').value;
             if(!amount || amount <= 0) return alert("Введите сумму");
-            
             closeMakeOffer();
-            // Show loading
-            
             const res = await fetch('/api/make_offer', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    buyer_id: USER_ID,
-                    buyer_username: USERNAME,
-                    asset_id: selectedItem.id,
-                    amount: parseInt(amount)
-                })
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ buyer_id: USER_ID, buyer_username: USERNAME, asset_id: selectedItem.id, amount: parseInt(amount) })
             });
             const result = await res.json();
             if(result.success) {
                 showMsg('Предложение отправлено!', 'Пользователь получит уведомление.');
                 closeModal();
-            } else {
-                alert(result.error);
-            }
+            } else { alert(result.error); }
         }
 
-        // Load Offers for Owner
         async function loadOffers(assetId) {
             const res = await fetch(\`/api/offers/\${assetId}\`);
             const offers = await res.json();
             const container = document.getElementById('offersContainer');
             const list = document.getElementById('offersList');
             list.innerHTML = '';
-            
             if(offers.length > 0) {
                 container.style.display = 'block';
                 offers.forEach(off => {
                     const div = document.createElement('div');
                     div.className = 'offer-item';
-                    div.innerHTML = \`
-                        <div class="offer-left">
-                            <div class="offer-icon">⭐️</div>
-                            <div>
-                                <div style="font-weight:bold">\${off.amount} звезды</div>
-                                <div style="font-size:12px;color:#777">От \${off.buyer_username}</div>
-                            </div>
-                        </div>
-                        <button class="btn-offer-accept" onclick='openRespondPopup(\${JSON.stringify(off)})'>Принять</button>
-                    \`;
+                    div.innerHTML = \`<div class="offer-left"><div class="offer-icon">⭐️</div><div><div style="font-weight:bold">\${off.amount} звезды</div><div style="font-size:12px;color:#777">От \${off.buyer_username}</div></div></div><button class="btn-offer-accept" onclick='openRespondPopup(\${JSON.stringify(off)})'>Принять</button>\`;
                     list.appendChild(div);
                 });
-            } else {
-                container.style.display = 'none';
-            }
+            } else { container.style.display = 'none'; }
         }
 
         function openRespondPopup(offer) {
@@ -810,43 +830,30 @@ app.get('/', (req, res) => {
             document.getElementById('respTitle').innerText = 'Активное предложение';
             document.getElementById('respDesc').innerText = \`\${offer.buyer_username} хочет купить \${selectedItem.name} #\${selectedItem.serial_number}\`;
             document.getElementById('respPrice').innerText = \`\${offer.amount} ⭐️\`;
-            
             document.getElementById('respondPopup').style.display = 'flex';
         }
 
         async function acceptOffer() {
             document.getElementById('respondPopup').style.display = 'none';
-            // Logic
-            const res = await fetch('/api/respond_offer', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ offer_id: selectedOffer.id, action: 'accept', seller_id: USER_ID })
-            });
+            const res = await fetch('/api/respond_offer', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ offer_id: selectedOffer.id, action: 'accept', seller_id: USER_ID }) });
             const r = await res.json();
             if(r.success) {
                 showMsg('Продано!', \`Вы получили \${selectedOffer.amount} звезд.\`);
-                // Remove from my assets
                 myAssets = myAssets.filter(a => a.id !== selectedItem.id);
                 userBalance += selectedOffer.amount;
                 updateBalance();
                 closeModal();
-            } else {
-                alert(r.error);
-            }
+            } else { alert(r.error); }
         }
 
         function confirmDecline() {
             document.getElementById('respondPopup').style.display = 'none';
             document.getElementById('declineConfirmPopup').style.display = 'flex';
         }
-        function closeDecline() {
-            document.getElementById('declineConfirmPopup').style.display = 'none';
-        }
+        function closeDecline() { document.getElementById('declineConfirmPopup').style.display = 'none'; }
         async function doDecline() {
             closeDecline();
-            const res = await fetch('/api/respond_offer', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ offer_id: selectedOffer.id, action: 'decline' })
-            });
+            const res = await fetch('/api/respond_offer', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ offer_id: selectedOffer.id, action: 'decline' }) });
             showMsg('Отклонено', 'Предложение удалено.');
             closeModal();
         }
@@ -859,7 +866,6 @@ app.get('/', (req, res) => {
             container.appendChild(div);
         }
         function closeModal() { document.getElementById('modal').classList.remove('open'); }
-        
         function showMsg(title, desc) {
             document.getElementById('msgTitle').innerText = title;
             document.getElementById('msgDesc').innerText = desc;
@@ -867,7 +873,57 @@ app.get('/', (req, res) => {
         }
         function closeMsg() { document.getElementById('msgPopup').style.display = 'none'; }
 
-        // --- ACTIONS (BUY/UPGRADE) ---
+        // --- AUCTION ---
+        let auctionInterval;
+        function startAuctionTimer() {
+            let timeLeft = 180;
+            const timerEl = document.getElementById('auctionTimer');
+            if(auctionInterval) clearInterval(auctionInterval);
+            function update() {
+                const m = Math.floor(timeLeft / 60);
+                const s = timeLeft % 60;
+                timerEl.innerText = \`Осталось \${m} мин \${s < 10 ? '0'+s : s} сек\`;
+                if(timeLeft <= 0) { clearInterval(auctionInterval); timerEl.innerText = "Аукцион завершен"; }
+                timeLeft--;
+            }
+            update();
+            auctionInterval = setInterval(update, 1000);
+        }
+        function openAuctionModal(item) {
+            selectedItem = item;
+            document.getElementById('auctionIcon').innerHTML = renderIcon(item.icon);
+            document.getElementById('bidsList').innerHTML = '<div style="color:#777; text-align:center; padding:10px;">Загрузка...</div>';
+            socket.emit('join_auction', item.id);
+            const slider = document.getElementById('bidSlider');
+            slider.value = 20000;
+            updateBidDisplay(20000);
+            startAuctionTimer();
+            document.getElementById('auctionModal').classList.add('open');
+        }
+        function closeAuctionModal() { if(auctionInterval) clearInterval(auctionInterval); document.getElementById('auctionModal').classList.remove('open'); }
+        async function placeBid() {
+            const amount = currentBidValue;
+            if(amount > userBalance) { alert("Недостаточно средств!"); return; }
+            const res = await fetch('/api/bid', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ tg_id: USER_ID, item_id: selectedItem.id, amount: amount, username: USERNAME, photo_url: PHOTO_URL }) });
+            const data = await res.json();
+            if(data.success) {
+                userBalance = data.newBalance;
+                updateBalance();
+                tg.HapticFeedback.notificationOccurred('success');
+            } else { alert(data.error); }
+        }
+        function closeVictory() { document.getElementById('victoryPopup').style.display = 'none'; }
+        socket.on('new_bid', (bidData) => { addBidToList(bidData); });
+        socket.on('auction_history', (history) => { const list = document.getElementById('bidsList'); list.innerHTML = ''; history.forEach(bid => addBidToList(bid)); });
+        function addBidToList(bid) {
+            const list = document.getElementById('bidsList');
+            const row = document.createElement('div');
+            row.className = 'bid-row';
+            row.innerHTML = \`<img src="\${bid.photo_url || 'https://cdn-icons-png.flaticon.com/512/147/147144.png'}" class="bid-avatar"><div class="bid-info"><div class="bid-name">\${bid.username}</div></div><div class="bid-amount">\${STAR_ICON_HTML} \${parseInt(bid.amount).toLocaleString()}</div>\`;
+            list.prepend(row);
+        }
+
+        // --- ACTIONS ---
         async function handleAction() {
             if(currentTab === 'store') {
                 const res = await fetch('/api/buy', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ tg_id: USER_ID, item_id: selectedItem.id, username: USERNAME }) });
@@ -887,8 +943,8 @@ app.get('/', (req, res) => {
                     selectedItem.is_upgraded = 1;
                     Object.assign(selectedItem, data.updates);
                     updateBalance();
-                    closeModal(); // Закрыть и показать новое окно? Или просто обновить
-                    openModal(selectedItem); // Переоткрыть
+                    closeModal();
+                    openModal(selectedItem);
                     showMsg('Улучшено!', 'Предмет получил уникальные свойства.');
                 } else alert(data.error);
             }
