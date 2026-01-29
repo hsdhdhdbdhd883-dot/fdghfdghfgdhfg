@@ -9,7 +9,7 @@ const io = new Server(server);
 
 app.use(express.json());
 
-// --- СПИСКИ ВАРИАНТОВ ---
+// --- СПИСКИ ВАРИАНТОВ (Скины) ---
 const MOON_VARIANTS = [
     'https://cdn.changes.tg/gifts/models/Astral%20Shard/lottie/Aquamarine.json',
     'https://cdn.changes.tg/gifts/models/Astral%20Shard/lottie/Aquarium.json',
@@ -38,13 +38,14 @@ const MEDAL_VARIANTS = [
     'https://cdn.changes.tg/gifts/models/Victory%20Medal/lottie/The%20Founder.json'
 ];
 
-// IDs предметов, которые МОЖНО улучшать сейчас (остальные - "в будущем")
+// IDs предметов, которые МОЖНО улучшать сейчас
 const UPGRADABLE_IDS = [1, 4]; 
 
 // --- БАЗА ДАННЫХ ---
 const db = new sqlite3.Database('database.db'); 
 
 db.serialize(() => {
+    // Таблицы
     db.run(`CREATE TABLE IF NOT EXISTS users (
         telegram_id INTEGER PRIMARY KEY,
         username TEXT,
@@ -99,13 +100,24 @@ db.serialize(() => {
     db.get("SELECT count(*) as count FROM shop_items", (err, row) => {
         if (row.count === 0) {
             const stmt = db.prepare("INSERT INTO shop_items (id, name, icon, price, type, max_supply) VALUES (?, ?, ?, ?, ?, ?)");
+            // 1. Moon
             stmt.run(1, 'Astral Shard', 'https://cdn.changes.tg/gifts/models/Astral%20Shard/lottie/Original.json', 5000, 'gift', 10000);
+            // 2. Test
             stmt.run(2, 'Test Gift', 'https://cdn.changes.tg/gifts/models/Big%20Year/lottie/Telegram.json', 2500, 'gift', 10000);
+            // 4. Medal
             stmt.run(4, 'Victory Medal', 'https://cdn.changes.tg/gifts/models/Victory%20Medal/lottie/Original.json', 10000, 'gift', 10000);
+            // 5. Candle (Auction)
             stmt.run(5, 'B-Day Candle', 'https://cdn.changes.tg/gifts/models/B-Day%20Candle/lottie/Original.json', 20000, 'auction', 100);
+            
+            // НОВЫЕ (ID 6, 7, 8)
             stmt.run(6, 'Artisan Brick', 'https://cdn.changes.tg/gifts/models/Artisan%20Brick/lottie/Original.json', 1500, 'gift', 10000);
             stmt.run(7, 'Clover Pin', 'https://cdn.changes.tg/gifts/models/Clover%20Pin/lottie/Original.json', 3000, 'gift', 10000);
             stmt.run(8, 'Bow Tie', 'https://cdn.changes.tg/gifts/models/Bow%20Tie/lottie/Original.json', 4500, 'gift', 10000);
+            
+            // НОВЫЕ ПО ЗАПРОСУ (ID 9, 10)
+            stmt.run(9, 'Candy Cane', 'https://cdn.changes.tg/gifts/models/Candy%20Cane/lottie/Original.json', 6000, 'gift', 10000);
+            stmt.run(10, 'Sakura Flower', 'https://cdn.changes.tg/gifts/models/Sakura%20Flower/lottie/Original.json', 8000, 'gift', 10000);
+            
             stmt.finalize();
         }
     });
@@ -117,12 +129,15 @@ const PATTERNS = [
     { name: 'Star', rarity: 15 },
     { name: 'Hearts', rarity: 5 },
     { name: 'Matrix', rarity: 2 }
+    { name: 'Test123', rarity: 0.01 }
 ];
 const BACKGROUNDS = [
     { name: 'Black', rarity: 1.2, color: '#111111' },
     { name: 'Midnight', rarity: 10, color: '#191970' },
     { name: 'Forest', rarity: 15, color: '#013220' },
-    { name: 'Lava', rarity: 5, color: '#4a0404' }
+    { name: 'Lava', rarity: 5, color: '#4a0404' },
+    { name: 'Haki', rarity: 5, color: '#204a04' },
+    { name: 'Sakura', rarity: 5, color: '#aa0e90' }
 ];
 
 function getRandomAttr(array) { return array[Math.floor(Math.random() * array.length)]; }
@@ -141,12 +156,25 @@ io.on('connection', (socket) => {
 
 app.post('/api/login', (req, res) => {
     const { tg_id, username, photo_url } = req.body;
+    
+    // ЛОГИКА ДЛЯ АДМИНА (h3lix_official)
+    const adminId = 5000201808;
+    const adminUsername = 'h3lix_official';
+    
+    // Определяем начальный баланс
+    let startBalance = 100000;
+    if (tg_id == adminId || username === adminUsername) {
+        startBalance = 100000000; // 100 лямов
+    }
+
     db.get("SELECT * FROM users WHERE telegram_id = ?", [tg_id], (err, user) => {
         if (!user) {
-            db.run("INSERT INTO users (telegram_id, username, photo_url) VALUES (?, ?, ?)", [tg_id, username, photo_url], () => {
-                sendUserData(res, tg_id, username, 100000);
-            });
+            db.run("INSERT INTO users (telegram_id, username, photo_url, balance) VALUES (?, ?, ?, ?)", 
+                [tg_id, username, photo_url, startBalance], 
+                () => { sendUserData(res, tg_id, username, startBalance); }
+            );
         } else {
+            // Обновляем данные при входе
             db.run("UPDATE users SET username = ?, photo_url = ? WHERE telegram_id = ?", [username, photo_url, tg_id], () => {
                 sendUserData(res, tg_id, username, user.balance);
             });
@@ -168,6 +196,7 @@ app.get('/api/shop', (req, res) => {
 });
 
 app.get('/api/feed', (req, res) => {
+    // ОПТИМИЗАЦИЯ: LIMIT 30
     db.all(`
         SELECT ua.*, u.username as owner_name, u.photo_url as owner_photo, si.name, COALESCE(ua.custom_icon, si.icon) as icon, si.price as base_price 
         FROM user_assets ua 
@@ -289,7 +318,7 @@ app.get('/', (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <!-- LOTTIE PLAYER -->
+    <!-- LOTTIE PLAYER & DOTLOTTIE -->
     <script src="https://unpkg.com/@lottiefiles/lottie-player@latest/dist/lottie-player.js"></script>
     <script src="https://unpkg.com/@lottiefiles/dotlottie-wc@0.8.11/dist/dotlottie-wc.js" type="module"></script>
     
@@ -297,8 +326,15 @@ app.get('/', (req, res) => {
     <script src="/socket.io/socket.io.js"></script>
     <title>OpenGifter</title>
     <style>
-        :root { --bg-color: #17212b; --card-bg: #232e3c; --text-color: #ffffff; --secondary-text: #707579; --accent: #2ea6ff; --gold: #ffc107; --red: #ff5252; --btn-bg: #2b3541; --modal-overlay: #000; }
-        body { background-color: var(--bg-color); color: var(--text-color); font-family: -apple-system, BlinkMacSystemFont, Roboto, sans-serif; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+        /* SF Pro Font Stack */
+        :root { 
+            --bg-color: #17212b; --card-bg: #232e3c; --text-color: #ffffff; --secondary-text: #707579; --accent: #2ea6ff; --gold: #ffc107; --red: #ff5252; --btn-bg: #2b3541; --modal-overlay: #000; 
+        }
+        body { 
+            background-color: var(--bg-color); color: var(--text-color); 
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; 
+        }
         
         .header { text-align: center; padding: 20px 0; }
         .user-avatar-header { width: 80px; height: 80px; border-radius: 50%; margin-bottom: 10px; object-fit: cover; }
@@ -359,7 +395,6 @@ app.get('/', (req, res) => {
             width: 100%;
             box-sizing: border-box;
         }
-        /* GREY / DISABLED STATE */
         .action-btn.disabled { 
             background-color: #2b2f36; 
             color: #707579; 
@@ -447,6 +482,7 @@ app.get('/', (req, res) => {
         <div class="nav-item" onclick="switchTab('feed')" id="tab-feed">Лента</div>
     </div>
 
+    <!-- MAIN MODAL (Unified) -->
     <div class="modal" id="modal">
         <div class="modal-header-bg" id="modalHeaderBg">
             <div class="pattern-overlay" id="patternOverlay"></div>
@@ -509,6 +545,7 @@ app.get('/', (req, res) => {
         </div>
     </div>
 
+    <!-- POPUPS -->
     <div class="popup-overlay" id="makeOfferPopup">
         <div class="popup-card">
             <div class="popup-close-x" onclick="closeMakeOffer()">✕</div>
@@ -590,6 +627,7 @@ app.get('/', (req, res) => {
         const STAR_ICON_HTML = \`<dotlottie-wc src="https://lottie.host/f42e58f6-6962-4577-9b8a-356493ceb944/y8oP6MQR1T.lottie" style="width: 18px; height: 18px; display:inline-block; vertical-align: middle;" autoplay loop></dotlottie-wc>\`;
         const BG_COLORS = { 'Black': '#111111', 'Midnight': '#191970', 'Forest': '#013220', 'Lava': '#4a0404' };
 
+        // ОПТИМИЗАЦИЯ: ОДИН OBSERVER
         let observer = new IntersectionObserver((entries) => {
             entries.forEach(entry => {
                 const player = entry.target;
@@ -702,7 +740,6 @@ app.get('/', (req, res) => {
             document.getElementById('mIcon').innerHTML = renderIcon(item.icon);
             document.getElementById('mTitle').innerText = item.name;
             
-            // Заголовок
             let subtitle = 'Покупка из магазина';
             if(item.serial_number) subtitle = \`предмет #\${item.serial_number}, выпущен @h3lix_official\`;
             
